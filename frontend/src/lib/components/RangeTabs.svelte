@@ -1,0 +1,49 @@
+<script lang="ts">
+	let {
+		active = '4 Weeks',
+		options = ['4 Weeks', '6 Months', 'All Time']
+	}: {
+		active?: string;
+		options?: string[];
+	} = $props();
+</script>
+
+<div class="range-tabs" aria-label="Time range">
+	{#each options as option (option)}
+		<button type="button" class:active={option === active}>{option}</button>
+	{/each}
+</div>
+
+<style>
+	.range-tabs {
+		display: flex;
+		align-items: center;
+		padding: 4px;
+		border: 1px solid rgba(255, 255, 255, 0.16);
+		border-radius: 999px;
+		background: rgba(255, 255, 255, 0.02);
+	}
+
+	button {
+		min-width: 96px;
+		border: 0;
+		border-radius: 999px;
+		background: transparent;
+		color: #c8ceca;
+		font-weight: 700;
+		padding: 10px 16px;
+		cursor: pointer;
+	}
+
+	button.active {
+		background: #62e792;
+		color: #06120a;
+	}
+
+	@media (max-width: 560px) {
+		button {
+			min-width: 0;
+			padding-inline: 12px;
+		}
+	}
+</style>
