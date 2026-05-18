@@ -105,7 +105,7 @@
 			<section class="login-panel">
 				<strong class="login-brand">Aurafy</strong>
 				<h1>Sign in with Spotify</h1>
-				<p>Connect your Spotify account to start building your listening stats.</p>
+				<p>Connect your Spotify account to view your listening insights.</p>
 
 				{#if authError}
 					<p class="login-error">Spotify sign in did not complete. Try again.</p>

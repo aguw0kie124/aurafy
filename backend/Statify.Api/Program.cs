@@ -14,7 +14,6 @@ DevelopmentEnvLoader.Load();
 var builder = WebApplication.CreateBuilder(args);
 
 builder.Services.Configure<SpotifyOptions>(builder.Configuration.GetSection(SpotifyOptions.SectionName));
-builder.Services.Configure<SyncOptions>(builder.Configuration.GetSection(SyncOptions.SectionName));
 builder.Services
     .AddAuthentication(CookieAuthenticationDefaults.AuthenticationScheme)
     .AddCookie(options =>
@@ -36,8 +35,6 @@ builder.Services
 builder.Services.AddAuthorization();
 builder.Services.AddHttpClient<SpotifyAuthService>();
 builder.Services.AddSingleton<FrontendRedirectService>();
-builder.Services.AddSingleton<PreviewStatsService>();
-builder.Services.AddHostedService<ListeningHistorySyncWorker>();
 
 builder.Services.AddCors(options =>
 {
@@ -62,19 +59,6 @@ app.UseAuthorization();
 
 app.MapGet("/api/health", () =>
     Results.Ok(new HealthResponse("ok", DateTimeOffset.UtcNow)));
-
-app.MapGet("/api/meta", (IOptions<SpotifyOptions> spotifyOptions) =>
-{
-    var configured = spotifyOptions.Value.IsConfigured;
-
-    return Results.Ok(new AppMetaResponse(
-        "Aurafy",
-        configured,
-        [
-            "user-read-recently-played",
-            "user-top-read"
-        ]));
-});
 
 app.MapGet("/api/auth/me", (ClaimsPrincipal user) =>
 {
@@ -213,19 +197,6 @@ app.MapGet("/api/auth/spotify/callback", async (
 
         return Results.Redirect(frontendRedirectService.LoginError("spotify_auth_failed"));
     }
-});
-
-app.MapGet("/api/stats/preview", (PreviewStatsService previewStatsService) =>
-    Results.Ok(previewStatsService.GetPreview()));
-
-app.MapPost("/api/sync/manual", (IOptions<SyncOptions> syncOptions) =>
-{
-    var response = new ManualRefreshResponse(
-        "queued",
-        DateTimeOffset.UtcNow,
-        syncOptions.Value.ManualRefreshCooldownMinutes);
-
-    return Results.Accepted("/api/sync/manual", response);
 });
 
 app.Run();
