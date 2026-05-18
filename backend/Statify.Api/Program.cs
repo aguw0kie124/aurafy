@@ -36,7 +36,7 @@ app.MapGet("/api/meta", (IOptions<SpotifyOptions> spotifyOptions) =>
     var configured = spotifyOptions.Value.IsConfigured;
 
     return Results.Ok(new AppMetaResponse(
-        "Statify",
+        "Aurafy",
         configured,
         [
             "user-read-recently-played",

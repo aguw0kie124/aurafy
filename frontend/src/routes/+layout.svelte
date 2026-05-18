@@ -21,13 +21,13 @@
 
 <svelte:head>
 	<link rel="icon" href={favicon} />
-	<title>Statify</title>
+	<title>Aurafy</title>
 </svelte:head>
 
 <div class="app-frame">
 	<header class="topbar">
 		<div class="page-shell topbar-inner">
-			<a class="brand" href={resolve('/')}>Statify</a>
+			<a class="brand" href={resolve('/')}>Aurafy</a>
 
 			<label class="search">
 				<Search size={18} strokeWidth={2} />
