@@ -1,14 +1,16 @@
 <script lang="ts">
-	import { page } from '$app/state';
-	import { resolve } from '$app/paths';
 	import { onMount } from 'svelte';
-	import { Bell, LogIn, LogOut, Search, Settings } from '@lucide/svelte';
+	import { LogIn, LogOut } from '@lucide/svelte';
 	import MediaThumb from '$lib/components/MediaThumb.svelte';
 	import { API_BASE_URL } from '$lib/config';
 	import favicon from '$lib/assets/favicon.svg';
-	import '../app.css';
-
-	let { children } = $props();
+	import Dashboard from './pages/Dashboard.svelte';
+	import Artists from './pages/Artists.svelte';
+	import Songs from './pages/Songs.svelte';
+	import Albums from './pages/Albums.svelte';
+	import Genres from './pages/Genres.svelte';
+	import Recap from './pages/Recap.svelte';
+	import './app.css';
 
 	type AuthUser = {
 		spotifyUserId: string;
@@ -29,8 +31,20 @@
 		{ label: 'Genres', href: '/genres' }
 	] as const;
 
-	const currentPath = $derived(page.url.pathname);
-	const authError = $derived(page.url.searchParams.get('auth_error'));
+	const pages = {
+		'/': Dashboard,
+		'/artists': Artists,
+		'/songs': Songs,
+		'/albums': Albums,
+		'/genres': Genres,
+		'/recap': Recap
+	} as const;
+
+	let currentUrl = $state(new URL(window.location.href));
+
+	const currentPath = $derived(currentUrl.pathname);
+	const authError = $derived(currentUrl.searchParams.get('auth_error'));
+	const CurrentPage = $derived(pages[currentPath as keyof typeof pages] ?? Dashboard);
 
 	let authStatus = $state<'loading' | 'anonymous' | 'authenticated'>('loading');
 	let user = $state<AuthUser | null>(null);
@@ -40,6 +54,16 @@
 
 	onMount(() => {
 		void loadSession();
+
+		const handlePopState = () => {
+			currentUrl = new URL(window.location.href);
+		};
+
+		window.addEventListener('popstate', handlePopState);
+
+		return () => {
+			window.removeEventListener('popstate', handlePopState);
+		};
 	});
 
 	async function loadSession() {
@@ -83,7 +107,12 @@
 
 		user = null;
 		authStatus = 'anonymous';
-		window.location.assign(resolve('/'));
+		navigate('/');
+	}
+
+	function navigate(path: string) {
+		window.history.pushState({}, '', path);
+		currentUrl = new URL(window.location.href);
 	}
 </script>
 
@@ -122,19 +151,25 @@
 	{:else}
 		<header class="topbar">
 			<div class="page-shell topbar-inner">
-				<a class="brand" href={resolve('/')}>Aurafy</a>
-
-				<label class="search">
-					<Search size={18} strokeWidth={2} />
-					<input type="search" placeholder="Search..." />
-				</label>
+				<a
+					class="brand"
+					href="/"
+					onclick={(event) => {
+						event.preventDefault();
+						navigate('/');
+					}}>Aurafy</a
+				>
 
 				<nav aria-label="Primary">
 					{#each navItems as item (item.href)}
 						<a
-							href={resolve(item.href)}
+							href={item.href}
 							class:active={currentPath === item.href}
 							aria-current={currentPath === item.href ? 'page' : undefined}
+							onclick={(event) => {
+								event.preventDefault();
+								navigate(item.href);
+							}}
 						>
 							{item.label}
 						</a>
@@ -142,16 +177,10 @@
 				</nav>
 
 				<div class="tools">
-					<button type="button" aria-label="Notifications">
-						<Bell size={20} strokeWidth={2} />
-					</button>
-					<button type="button" aria-label="Settings">
-						<Settings size={21} strokeWidth={2} />
-					</button>
 					<button type="button" aria-label="Log out" onclick={logout}>
 						<LogOut size={20} strokeWidth={2} />
 					</button>
-					<span class="profile">
+					<button type="button" class="profile" aria-label="Profile settings">
 						<MediaThumb
 							kind="artist"
 							src={user?.imageUrl ?? undefined}
@@ -160,13 +189,13 @@
 							round
 							label={user?.displayName ?? 'You'}
 						/>
-					</span>
+					</button>
 				</div>
 			</div>
 		</header>
 
 		<main class="page-shell app-main">
-			{@render children()}
+			<CurrentPage />
 		</main>
 	{/if}
 </div>
@@ -247,7 +276,7 @@
 
 	.topbar-inner {
 		display: grid;
-		grid-template-columns: auto minmax(220px, 320px) 1fr auto;
+		grid-template-columns: auto 1fr auto;
 		align-items: center;
 		gap: 28px;
 		min-height: 78px;
@@ -257,29 +286,6 @@
 		color: #71ef9d;
 		font-size: 1.7rem;
 		font-weight: 700;
-	}
-
-	.search {
-		display: flex;
-		align-items: center;
-		gap: 12px;
-		min-height: 48px;
-		padding: 0 18px;
-		border-radius: 999px;
-		background: rgba(255, 255, 255, 0.03);
-		color: #d0d5d2;
-	}
-
-	.search input {
-		width: 100%;
-		border: 0;
-		background: transparent;
-		color: #f7f8f7;
-		outline: 0;
-	}
-
-	.search input::placeholder {
-		color: #d0d5d2;
 	}
 
 	nav {
@@ -330,6 +336,8 @@
 
 	.profile {
 		display: grid;
+		width: auto;
+		height: auto;
 		padding-left: 4px;
 	}
 
@@ -339,16 +347,6 @@
 	}
 
 	@media (max-width: 1100px) {
-		.topbar-inner {
-			grid-template-columns: auto 1fr auto;
-		}
-
-		.search {
-			order: 3;
-			grid-column: 1 / -1;
-			margin-bottom: 16px;
-		}
-
 		nav {
 			justify-content: end;
 		}
@@ -376,11 +374,6 @@
 
 		nav a::after {
 			bottom: 8px;
-		}
-
-		.search {
-			order: 4;
-			margin-bottom: 0;
 		}
 	}
 </style>

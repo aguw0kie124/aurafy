@@ -4,7 +4,7 @@ Aurafy is a Spotify listening stats app for seeing your music habits throughout 
 
 ## Tech Stack
 
-- Frontend: SvelteKit
+- Frontend: Svelte + Vite
 - Backend: ASP.NET Core
 - Database: PostgreSQL (Supabase)
 

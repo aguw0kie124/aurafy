@@ -1,5 +1,4 @@
 <script lang="ts">
-	import { resolve } from '$app/paths';
 	import EmptyState from '$lib/components/EmptyState.svelte';
 	import MediaThumb from '$lib/components/MediaThumb.svelte';
 	import { artists, dashboardSummary, tasteProfile, tracks } from '$lib/data/music';
@@ -51,7 +50,7 @@
 
 		<div class="overview-actions">
 			<button type="button" disabled={tracks.length === 0}>Play Top Tracks</button>
-			<a href={resolve('/recap')}>View Full Report</a>
+			<a href="/recap">View Full Report</a>
 		</div>
 
 		<div class="summary-grid">
