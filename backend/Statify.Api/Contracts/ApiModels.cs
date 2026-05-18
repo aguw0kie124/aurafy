@@ -12,6 +12,15 @@ public sealed record ManualRefreshResponse(
     DateTimeOffset QueuedAtUtc,
     int CooldownMinutes);
 
+public sealed record AuthStatusResponse(
+    bool Authenticated,
+    AuthUserResponse? User);
+
+public sealed record AuthUserResponse(
+    string SpotifyUserId,
+    string DisplayName,
+    string? ImageUrl);
+
 public sealed record PreviewStatsResponse(
     string RangeLabel,
     int ListeningMinutes,

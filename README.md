@@ -30,3 +30,9 @@ Aurafy is a Spotify listening stats app for seeing your music habits throughout 
    cd frontend
    npm run dev
    ```
+
+5. Open the app:
+
+   ```text
+   http://127.0.0.1:5173
+   ```
