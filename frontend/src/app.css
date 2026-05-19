@@ -1,5 +1,15 @@
 :root {
 	color-scheme: dark;
+	--color-canvas: #000;
+	--color-surface: #121212;
+	--color-surface-elevated: #181818;
+	--color-surface-hover: #242424;
+	--color-border: rgba(255, 255, 255, 0.1);
+	--color-text: #fff;
+	--color-muted: #b3b3b3;
+	--color-soft: #d6d6d6;
+	--color-accent: #1ed760;
+	--color-accent-hover: #3be477;
 	font-family:
 		'Plus Jakarta Sans',
 		ui-sans-serif,
@@ -8,8 +18,8 @@
 		BlinkMacSystemFont,
 		'Segoe UI',
 		sans-serif;
-	background: #171717;
-	color: #f4f5f4;
+	background: var(--color-canvas);
+	color: var(--color-text);
 	font-synthesis: none;
 	text-rendering: optimizeLegibility;
 }
@@ -19,14 +29,14 @@
 }
 
 html {
-	background: #171717;
+	background: var(--color-canvas);
 }
 
 body {
 	margin: 0;
 	min-width: 320px;
-	background: #171717;
-	color: #f4f5f4;
+	background: var(--color-canvas);
+	color: var(--color-text);
 }
 
 a {
@@ -38,17 +48,48 @@ button {
 	font: inherit;
 }
 
+button,
+a {
+	-webkit-tap-highlight-color: transparent;
+}
+
+button:focus-visible,
+a:focus-visible {
+	outline: 2px solid var(--color-accent);
+	outline-offset: 3px;
+}
+
 .page-shell {
-	width: min(1480px, calc(100% - 64px));
+	width: min(1500px, calc(100% - 56px));
 	margin: 0 auto;
 }
 
 .eyebrow {
-	color: #95a3b3;
+	color: var(--color-accent);
 	font-size: 0.78rem;
 	font-weight: 700;
 	letter-spacing: 0;
 	text-transform: uppercase;
+}
+
+::selection {
+	background: rgba(30, 215, 96, 0.32);
+	color: #fff;
+}
+
+::-webkit-scrollbar {
+	width: 12px;
+	height: 12px;
+}
+
+::-webkit-scrollbar-thumb {
+	border: 3px solid var(--color-canvas);
+	border-radius: 999px;
+	background: #4c4c4c;
+}
+
+::-webkit-scrollbar-thumb:hover {
+	background: #666;
 }
 
 @media (max-width: 760px) {

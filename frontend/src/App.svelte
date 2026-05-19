@@ -5,7 +5,6 @@
 	import { API_BASE_URL } from '$lib/config';
 	import { loadMusicData, syncListeningHistory } from '$lib/data/music';
 	import favicon from '$lib/assets/favicon.svg';
-	import Dashboard from './pages/Dashboard.svelte';
 	import Artists from './pages/Artists.svelte';
 	import Songs from './pages/Songs.svelte';
 	import Albums from './pages/Albums.svelte';
@@ -24,14 +23,14 @@
 	};
 
 	const navItems = [
-		{ label: 'Dashboard', href: '/' },
+		{ label: 'Recap', href: '/' },
 		{ label: 'Artists', href: '/artists' },
 		{ label: 'Songs', href: '/songs' },
 		{ label: 'Albums', href: '/albums' }
 	] as const;
 
 	const pages = {
-		'/': Dashboard,
+		'/': Recap,
 		'/artists': Artists,
 		'/songs': Songs,
 		'/albums': Albums,
@@ -41,8 +40,9 @@
 	let currentUrl = $state(new URL(window.location.href));
 
 	const currentPath = $derived(currentUrl.pathname);
+	const activePath = $derived(currentPath === '/recap' ? '/' : currentPath);
 	const authError = $derived(currentUrl.searchParams.get('auth_error'));
-	const CurrentPage = $derived(pages[currentPath as keyof typeof pages] ?? Dashboard);
+	const CurrentPage = $derived(pages[currentPath as keyof typeof pages] ?? Recap);
 
 	let authStatus = $state<'loading' | 'anonymous' | 'authenticated'>('loading');
 	let user = $state<AuthUser | null>(null);
@@ -50,6 +50,7 @@
 	let statsStatus = $state<'idle' | 'loading' | 'ready' | 'error'>('idle');
 	let statsVersion = $state(0);
 	let syncing = $state(false);
+	let profileMenuOpen = $state(false);
 
 	const isAuthenticated = $derived(authStatus === 'authenticated' && user !== null);
 
@@ -58,12 +59,27 @@
 
 		const handlePopState = () => {
 			currentUrl = new URL(window.location.href);
+			profileMenuOpen = false;
+		};
+
+		const handleWindowClick = () => {
+			profileMenuOpen = false;
+		};
+
+		const handleKeydown = (event: KeyboardEvent) => {
+			if (event.key === 'Escape') {
+				profileMenuOpen = false;
+			}
 		};
 
 		window.addEventListener('popstate', handlePopState);
+		window.addEventListener('click', handleWindowClick);
+		window.addEventListener('keydown', handleKeydown);
 
 		return () => {
 			window.removeEventListener('popstate', handlePopState);
+			window.removeEventListener('click', handleWindowClick);
+			window.removeEventListener('keydown', handleKeydown);
 		};
 	});
 
@@ -130,6 +146,8 @@
 	}
 
 	async function logout() {
+		profileMenuOpen = false;
+
 		await fetch(`${API_BASE_URL}/api/auth/logout`, {
 			method: 'POST',
 			credentials: 'include'
@@ -142,6 +160,7 @@
 	}
 
 	function navigate(path: string) {
+		profileMenuOpen = false;
 		window.history.pushState({}, '', path);
 		currentUrl = new URL(window.location.href);
 	}
@@ -195,8 +214,8 @@
 					{#each navItems as item (item.href)}
 						<a
 							href={item.href}
-							class:active={currentPath === item.href}
-							aria-current={currentPath === item.href ? 'page' : undefined}
+							class:active={activePath === item.href}
+							aria-current={activePath === item.href ? 'page' : undefined}
 							onclick={(event) => {
 								event.preventDefault();
 								navigate(item.href);
@@ -217,19 +236,52 @@
 					>
 						<RefreshCw class={syncing ? 'spin' : undefined} size={20} strokeWidth={2} />
 					</button>
-					<button type="button" aria-label="Log out" onclick={logout}>
-						<LogOut size={20} strokeWidth={2} />
-					</button>
-					<button type="button" class="profile" aria-label="Profile settings">
-						<MediaThumb
-							kind="artist"
-							src={user?.imageUrl ?? undefined}
-							alt="Profile image"
-							size="small"
-							round
-							label={user?.displayName ?? 'You'}
-						/>
-					</button>
+					<div class="profile-menu-wrap">
+						<button
+							type="button"
+							class="profile"
+							aria-label="Profile menu"
+							aria-haspopup="menu"
+							aria-expanded={profileMenuOpen}
+							onclick={(event) => {
+								event.stopPropagation();
+								profileMenuOpen = !profileMenuOpen;
+							}}
+						>
+							<MediaThumb
+								kind="artist"
+								src={user?.imageUrl ?? undefined}
+								alt="Profile image"
+								size="small"
+								round
+								label={user?.displayName ?? 'You'}
+							/>
+						</button>
+
+						{#if profileMenuOpen}
+							<div class="profile-menu">
+								<div class="profile-summary">
+									<MediaThumb
+										kind="artist"
+										src={user?.imageUrl ?? undefined}
+										alt="Profile image"
+										size="small"
+										round
+										label={user?.displayName ?? 'You'}
+									/>
+									<span>
+										<strong>{user?.displayName ?? 'Spotify user'}</strong>
+										<small>{user?.spotifyUserId ?? 'Signed in'}</small>
+									</span>
+								</div>
+
+								<button type="button" class="menu-action" onclick={logout}>
+									<LogOut size={18} strokeWidth={2.1} />
+									Log out
+								</button>
+							</div>
+						{/if}
+					</div>
 				</div>
 			</div>
 		</header>
@@ -266,13 +318,14 @@
 		gap: 18px;
 		justify-items: start;
 		padding: 36px;
-		border: 1px solid rgba(255, 255, 255, 0.12);
-		border-radius: 10px;
-		background: #232323;
+		border: 1px solid var(--color-border);
+		border-radius: 8px;
+		background: var(--color-surface-elevated);
+		box-shadow: 0 24px 70px rgba(0, 0, 0, 0.4);
 	}
 
 	.login-brand {
-		color: #71ef9d;
+		color: var(--color-accent);
 		font-size: 1.6rem;
 	}
 
@@ -287,7 +340,7 @@
 	}
 
 	.login-panel p {
-		color: #d0d5d2;
+		color: var(--color-soft);
 		line-height: 1.5;
 	}
 
@@ -309,49 +362,69 @@
 		padding: 0 22px;
 		border: 0;
 		border-radius: 999px;
-		background: #19ce72;
+		background: var(--color-accent);
 		color: #061109;
 		font-weight: 800;
 		cursor: pointer;
+		transition:
+			background 160ms ease,
+			transform 160ms ease;
+	}
+
+	.login-panel button:hover {
+		background: var(--color-accent-hover);
+		transform: translateY(-1px);
 	}
 
 	.topbar {
-		border-bottom: 1px solid rgba(255, 255, 255, 0.08);
-		background: #373737;
+		position: sticky;
+		top: 0;
+		z-index: 20;
+		background: #000;
 	}
 
 	.topbar-inner {
 		display: grid;
 		grid-template-columns: auto 1fr auto;
 		align-items: center;
-		gap: 28px;
-		min-height: 78px;
+		gap: 24px;
+		min-height: 64px;
 	}
 
 	.brand {
-		color: #71ef9d;
-		font-size: 1.7rem;
-		font-weight: 700;
+		display: inline-flex;
+		align-items: center;
+		color: #fff;
+		font-size: 1.2rem;
+		font-weight: 900;
+		letter-spacing: 0;
 	}
 
 	nav {
 		display: flex;
 		align-items: center;
 		justify-content: center;
-		gap: clamp(18px, 2.6vw, 42px);
+		justify-self: center;
+		gap: clamp(18px, 3vw, 34px);
 	}
 
 	nav a {
 		position: relative;
-		color: #e3e7e4;
-		font-weight: 600;
-		padding: 29px 0 25px;
+		color: var(--color-muted);
+		font-size: 0.92rem;
+		font-weight: 800;
+		padding: 22px 0 20px;
+		transition: color 160ms ease;
+	}
+
+	nav a:hover {
+		color: #fff;
 	}
 
 	nav a::after {
 		position: absolute;
 		right: 0;
-		bottom: 18px;
+		bottom: 14px;
 		left: 0;
 		height: 2px;
 		border-radius: 999px;
@@ -359,25 +432,39 @@
 		content: '';
 	}
 
+	nav a.active {
+		color: #fff;
+	}
+
 	nav a.active::after {
-		background: #71ef9d;
+		background: var(--color-accent);
 	}
 
 	.tools {
 		display: flex;
 		align-items: center;
-		gap: 18px;
+		gap: 8px;
 	}
 
 	.tools button {
 		display: grid;
-		width: 34px;
-		height: 34px;
+		width: 36px;
+		height: 36px;
 		place-items: center;
 		border: 0;
+		border-radius: 999px;
 		background: transparent;
-		color: #dce2de;
+		color: var(--color-soft);
 		cursor: pointer;
+		transition:
+			background 160ms ease,
+			color 160ms ease,
+			transform 160ms ease;
+	}
+
+	.tools button:hover:not(:disabled) {
+		background: #1f1f1f;
+		color: #fff;
 	}
 
 	.tools button:disabled {
@@ -389,7 +476,73 @@
 		display: grid;
 		width: auto;
 		height: auto;
-		padding-left: 4px;
+		padding: 0;
+		border-color: transparent;
+		background: transparent;
+	}
+
+	.profile-menu-wrap {
+		position: relative;
+		display: grid;
+	}
+
+	.profile-menu {
+		position: absolute;
+		top: calc(100% + 10px);
+		right: 0;
+		z-index: 40;
+		display: grid;
+		width: min(260px, calc(100vw - 32px));
+		gap: 6px;
+		padding: 6px;
+		border-radius: 8px;
+		background: #282828;
+		box-shadow: 0 18px 50px rgba(0, 0, 0, 0.48);
+	}
+
+	.profile-summary {
+		display: grid;
+		grid-template-columns: 48px minmax(0, 1fr);
+		align-items: center;
+		gap: 12px;
+		padding: 10px;
+	}
+
+	.profile-summary span {
+		display: grid;
+		min-width: 0;
+		gap: 3px;
+	}
+
+	.profile-summary strong,
+	.profile-summary small {
+		min-width: 0;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+	}
+
+	.profile-summary small {
+		color: var(--color-muted);
+	}
+
+	.tools .menu-action {
+		display: flex;
+		width: 100%;
+		height: auto;
+		min-height: 42px;
+		align-items: center;
+		justify-content: start;
+		gap: 10px;
+		padding: 0 12px;
+		border-radius: 6px;
+		background: transparent;
+		color: #fff;
+		font-weight: 800;
+	}
+
+	.tools .menu-action:hover {
+		background: #3a3a3a;
 	}
 
 	.stats-error {
@@ -413,7 +566,7 @@
 
 	.app-main {
 		flex: 1;
-		padding-block: 42px 48px;
+		padding-block: 24px 48px;
 	}
 
 	@media (max-width: 1100px) {
@@ -433,17 +586,18 @@
 			order: 3;
 			grid-column: 1 / -1;
 			justify-content: space-between;
+			justify-self: stretch;
 			gap: 12px;
 			overflow-x: auto;
 		}
 
 		nav a {
-			padding: 12px 0 16px;
+			padding: 10px 0 14px;
 			white-space: nowrap;
 		}
 
 		nav a::after {
-			bottom: 8px;
+			bottom: 6px;
 		}
 	}
 </style>
