@@ -82,7 +82,7 @@ public sealed class StatsRepository(PostgresConnectionFactory connectionFactory)
                 parameters,
                 cancellationToken: cancellationToken));
 
-        var lastSyncedAt = await connection.QuerySingleOrDefaultAsync<DateTimeOffset?>(
+        var lastSyncedAt = await connection.QuerySingleOrDefaultAsync<DateTime?>(
             new CommandDefinition(
                 """
                 select max(completed_at)
@@ -102,8 +102,8 @@ public sealed class StatsRepository(PostgresConnectionFactory connectionFactory)
             CurrentArtistImageUrl: topArtist?.ImageUrl,
             TotalPlays: totals.TotalPlays,
             UniqueTracks: uniqueTracks,
-            LastPlayedAt: totals.LastPlayedAt,
-            LastSyncedAt: lastSyncedAt);
+            LastPlayedAt: totals.LastPlayedAt is null ? null : DbDateTime.ToUtcOffset(totals.LastPlayedAt.Value),
+            LastSyncedAt: lastSyncedAt is null ? null : DbDateTime.ToUtcOffset(lastSyncedAt.Value));
     }
 
     public async Task<IReadOnlyList<TrackStatsResponse>> GetTopTracksAsync(
@@ -242,6 +242,8 @@ public sealed class StatsRepository(PostgresConnectionFactory connectionFactory)
                 from stats s
                 join albums al on al.spotify_album_id = s.album_id
                 left join album_artists on album_artists.album_id = al.spotify_album_id
+                where lower(coalesce(al.album_type, 'album')) <> 'single'
+                    and coalesce(al.total_tracks, 2) > 1
                 order by s.listening_ms desc, s.plays desc, al.name
                 limit @Limit;
                 """,
@@ -369,7 +371,7 @@ public sealed class StatsRepository(PostgresConnectionFactory connectionFactory)
 public sealed record DashboardTotalsRecord(
     int TotalPlays,
     long ListeningMs,
-    DateTimeOffset? LastPlayedAt);
+    DateTime? LastPlayedAt);
 
 public sealed record TopArtistRecord(
     string Name,

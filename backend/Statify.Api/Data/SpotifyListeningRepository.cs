@@ -10,7 +10,7 @@ public sealed class SpotifyListeningRepository(PostgresConnectionFactory connect
     {
         await using var connection = await connectionFactory.OpenConnectionAsync(cancellationToken);
 
-        return await connection.QuerySingleOrDefaultAsync<DateTimeOffset?>(
+        var latestPlayedAt = await connection.QuerySingleOrDefaultAsync<DateTime?>(
             new CommandDefinition(
                 """
                 select max(played_at)
@@ -19,6 +19,8 @@ public sealed class SpotifyListeningRepository(PostgresConnectionFactory connect
                 """,
                 new { UserId = userId },
                 cancellationToken: cancellationToken));
+
+        return latestPlayedAt is null ? null : DbDateTime.ToUtcOffset(latestPlayedAt.Value);
     }
 
     public async Task<SyncRunRecord> StartSyncRunAsync(
@@ -175,6 +177,23 @@ public sealed class SpotifyListeningRepository(PostgresConnectionFactory connect
         await transaction.CommitAsync(cancellationToken);
 
         return insertedCount;
+    }
+
+    public async Task UpsertArtistsAsync(
+        IReadOnlyCollection<SpotifyArtistWriteModel> artists,
+        CancellationToken cancellationToken)
+    {
+        if (artists.Count == 0)
+        {
+            return;
+        }
+
+        await using var connection = await connectionFactory.OpenConnectionAsync(cancellationToken);
+
+        foreach (var artist in artists)
+        {
+            await UpsertArtistAsync(connection, null, artist, cancellationToken);
+        }
     }
 
     public async Task RebuildDailyAggregatesAsync(Guid userId, CancellationToken cancellationToken)
@@ -364,7 +383,7 @@ public sealed class SpotifyListeningRepository(PostgresConnectionFactory connect
 
     private static Task UpsertAlbumAsync(
         Npgsql.NpgsqlConnection connection,
-        Npgsql.NpgsqlTransaction transaction,
+        Npgsql.NpgsqlTransaction? transaction,
         SpotifyAlbumWriteModel? album,
         CancellationToken cancellationToken)
     {
@@ -376,11 +395,29 @@ public sealed class SpotifyListeningRepository(PostgresConnectionFactory connect
         return connection.ExecuteAsync(
             new CommandDefinition(
                 """
-                insert into albums (spotify_album_id, name, release_date, image_url, external_url)
-                values (@SpotifyAlbumId, @Name, @ReleaseDate, @ImageUrl, @ExternalUrl)
+                insert into albums (
+                    spotify_album_id,
+                    name,
+                    release_date,
+                    album_type,
+                    total_tracks,
+                    image_url,
+                    external_url
+                )
+                values (
+                    @SpotifyAlbumId,
+                    @Name,
+                    @ReleaseDate,
+                    @AlbumType,
+                    @TotalTracks,
+                    @ImageUrl,
+                    @ExternalUrl
+                )
                 on conflict (spotify_album_id) do update set
                     name = excluded.name,
                     release_date = excluded.release_date,
+                    album_type = coalesce(excluded.album_type, albums.album_type),
+                    total_tracks = coalesce(excluded.total_tracks, albums.total_tracks),
                     image_url = coalesce(excluded.image_url, albums.image_url),
                     external_url = coalesce(excluded.external_url, albums.external_url),
                     updated_at = now();
@@ -392,7 +429,7 @@ public sealed class SpotifyListeningRepository(PostgresConnectionFactory connect
 
     private static Task UpsertArtistAsync(
         Npgsql.NpgsqlConnection connection,
-        Npgsql.NpgsqlTransaction transaction,
+        Npgsql.NpgsqlTransaction? transaction,
         SpotifyArtistWriteModel artist,
         CancellationToken cancellationToken)
     {
@@ -506,6 +543,8 @@ public sealed record SpotifyAlbumWriteModel(
     string SpotifyAlbumId,
     string Name,
     string? ReleaseDate,
+    string? AlbumType,
+    int? TotalTracks,
     string? ImageUrl,
     string? ExternalUrl);
 
@@ -516,11 +555,31 @@ public sealed record SpotifyArtistWriteModel(
     string? ImageUrl,
     string? ExternalUrl);
 
-public sealed record SyncRunRecord(
-    long Id,
-    string Status,
-    int FetchedCount,
-    int InsertedCount,
-    DateTimeOffset StartedAt,
-    DateTimeOffset? CompletedAt,
-    string? ErrorMessage);
+public sealed class SyncRunRecord
+{
+    public long Id { get; set; }
+
+    public string Status { get; set; } = string.Empty;
+
+    public int FetchedCount { get; set; }
+
+    public int InsertedCount { get; set; }
+
+    public DateTime StartedAt { get; set; }
+
+    public DateTime? CompletedAt { get; set; }
+
+    public string? ErrorMessage { get; set; }
+}
+
+internal static class DbDateTime
+{
+    public static DateTimeOffset ToUtcOffset(DateTime dateTime)
+    {
+        var utcDateTime = dateTime.Kind == DateTimeKind.Utc
+            ? dateTime
+            : DateTime.SpecifyKind(dateTime, DateTimeKind.Utc);
+
+        return new DateTimeOffset(utcDateTime);
+    }
+}

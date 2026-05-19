@@ -21,7 +21,7 @@
 		</header>
 
 		<ol>
-			{#each tracks as track, index (track.title)}
+			{#each tracks as track, index (track.spotifyTrackId ?? track.title)}
 				<li>
 					<em>{index + 1}</em>
 					<div class="title-cell">

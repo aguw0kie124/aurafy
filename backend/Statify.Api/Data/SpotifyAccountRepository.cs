@@ -144,7 +144,7 @@ public sealed record SpotifyTokenRecord(
     string RefreshTokenEncrypted,
     string TokenType,
     string Scope,
-    DateTimeOffset ExpiresAt);
+    DateTime ExpiresAt);
 
 public sealed record AppUserRecord(
     Guid Id,

@@ -9,6 +9,8 @@ namespace Statify.Api.Services;
 
 public sealed class SpotifyWebApiClient(HttpClient httpClient, ILogger<SpotifyWebApiClient> logger)
 {
+    private const int MaxAttempts = 3;
+
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
 
     public async Task<SpotifyUserProfileResponse> GetCurrentUserProfileAsync(
@@ -130,45 +132,62 @@ public sealed class SpotifyWebApiClient(HttpClient httpClient, ILogger<SpotifyWe
         Func<HttpRequestMessage> requestFactory,
         CancellationToken cancellationToken)
     {
-        for (var attempt = 0; attempt < 2; attempt++)
+        for (var attempt = 0; attempt < MaxAttempts; attempt++)
         {
-            using var request = requestFactory();
-            using var response = await httpClient.SendAsync(request, cancellationToken);
-            var body = await response.Content.ReadAsStringAsync(cancellationToken);
-
-            if (response.StatusCode == HttpStatusCode.TooManyRequests && attempt == 0)
+            try
             {
-                var retryAfter = response.Headers.RetryAfter?.Delta ?? TimeSpan.FromSeconds(1);
-                retryAfter = retryAfter > TimeSpan.FromSeconds(10) ? TimeSpan.FromSeconds(10) : retryAfter;
+                using var request = requestFactory();
+                using var response = await httpClient.SendAsync(request, cancellationToken);
+                var body = await response.Content.ReadAsStringAsync(cancellationToken);
+
+                if (IsRetryableStatus(response.StatusCode) && attempt < MaxAttempts - 1)
+                {
+                    var retryAfter = GetRetryDelay(response, attempt);
+                    logger.LogWarning(
+                        "Spotify request returned {StatusCode}. Retrying attempt {Attempt}/{MaxAttempts} after {RetryAfterSeconds} seconds.",
+                        (int)response.StatusCode,
+                        attempt + 2,
+                        MaxAttempts,
+                        retryAfter.TotalSeconds);
+
+                    await Task.Delay(retryAfter, cancellationToken);
+                    continue;
+                }
+
+                if (!response.IsSuccessStatusCode)
+                {
+                    throw new SpotifyApiException(
+                        $"Spotify API request failed with status {(int)response.StatusCode}.",
+                        response.StatusCode,
+                        body,
+                        response.Headers.RetryAfter?.Delta);
+                }
+
+                var result = JsonSerializer.Deserialize<T>(body, JsonOptions);
+
+                return result ?? throw new SpotifyApiException(
+                    "Spotify returned an empty or invalid JSON response.",
+                    response.StatusCode,
+                    body,
+                    null);
+            }
+            catch (HttpRequestException exception) when (attempt < MaxAttempts - 1)
+            {
+                var retryAfter = GetRetryDelay(null, attempt);
                 logger.LogWarning(
-                    "Spotify rate limit hit. Retrying after {RetryAfterSeconds} seconds.",
+                    exception,
+                    "Spotify request failed before receiving a response. Retrying attempt {Attempt}/{MaxAttempts} after {RetryAfterSeconds} seconds.",
+                    attempt + 2,
+                    MaxAttempts,
                     retryAfter.TotalSeconds);
 
                 await Task.Delay(retryAfter, cancellationToken);
-                continue;
             }
-
-            if (!response.IsSuccessStatusCode)
-            {
-                throw new SpotifyApiException(
-                    $"Spotify API request failed with status {(int)response.StatusCode}.",
-                    response.StatusCode,
-                    body,
-                    response.Headers.RetryAfter?.Delta);
-            }
-
-            var result = JsonSerializer.Deserialize<T>(body, JsonOptions);
-
-            return result ?? throw new SpotifyApiException(
-                "Spotify returned an empty or invalid JSON response.",
-                response.StatusCode,
-                body,
-                null);
         }
 
         throw new SpotifyApiException(
-            "Spotify API request was rate limited.",
-            HttpStatusCode.TooManyRequests,
+            "Spotify API request failed after retries.",
+            HttpStatusCode.ServiceUnavailable,
             string.Empty,
             null);
     }
@@ -182,6 +201,26 @@ public sealed class SpotifyWebApiClient(HttpClient httpClient, ILogger<SpotifyWe
     }
 
     private static int ClampLimit(int limit) => Math.Clamp(limit, 1, 50);
+
+    private static bool IsRetryableStatus(HttpStatusCode statusCode)
+    {
+        return statusCode is
+            HttpStatusCode.RequestTimeout or
+            HttpStatusCode.TooManyRequests or
+            HttpStatusCode.InternalServerError or
+            HttpStatusCode.BadGateway or
+            HttpStatusCode.ServiceUnavailable or
+            HttpStatusCode.GatewayTimeout;
+    }
+
+    private static TimeSpan GetRetryDelay(HttpResponseMessage? response, int attempt)
+    {
+        var retryAfter = response?.Headers.RetryAfter?.Delta;
+        var fallback = TimeSpan.FromSeconds(Math.Pow(2, attempt));
+        var delay = retryAfter is null || retryAfter.Value <= TimeSpan.Zero ? fallback : retryAfter.Value;
+
+        return delay > TimeSpan.FromSeconds(10) ? TimeSpan.FromSeconds(10) : delay;
+    }
 }
 
 public sealed class SpotifyPagingResponse<T>
@@ -287,6 +326,12 @@ public sealed class SpotifyAlbumObject
 
     [JsonPropertyName("name")]
     public string Name { get; init; } = string.Empty;
+
+    [JsonPropertyName("album_type")]
+    public string? AlbumType { get; init; }
+
+    [JsonPropertyName("total_tracks")]
+    public int? TotalTracks { get; init; }
 
     [JsonPropertyName("release_date")]
     public string? ReleaseDate { get; init; }

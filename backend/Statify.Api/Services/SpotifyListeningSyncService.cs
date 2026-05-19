@@ -50,13 +50,16 @@ public sealed class SpotifyListeningSyncService(
                 .Distinct(StringComparer.Ordinal)
                 .ToArray();
 
-            var hydratedArtists = await spotifyWebApiClient.GetArtistsByIdsAsync(
+            var hydratedArtistsById = await TryGetHydratedArtistsByIdAsync(
                 accessToken,
                 artistIds,
                 cancellationToken);
-            var hydratedArtistsById = hydratedArtists
-                .Where(artist => !string.IsNullOrWhiteSpace(artist.Id))
-                .ToDictionary(artist => artist.Id!, StringComparer.Ordinal);
+            var topArtistsById = await TryGetTopArtistsByIdAsync(accessToken, cancellationToken);
+
+            foreach (var (artistId, artist) in topArtistsById)
+            {
+                hydratedArtistsById[artistId] = artist;
+            }
 
             var writeModels = playbacks
                 .Select(playback => ToWriteModel(playback.Item, playback.Track, hydratedArtistsById))
@@ -67,6 +70,9 @@ public sealed class SpotifyListeningSyncService(
             insertedCount = await spotifyListeningRepository.UpsertPlaybackBatchAsync(
                 userId,
                 writeModels,
+                cancellationToken);
+            await spotifyListeningRepository.UpsertArtistsAsync(
+                topArtistsById.Values.Select(ToArtistWriteModel).ToArray(),
                 cancellationToken);
 
             await spotifyListeningRepository.RebuildDailyAggregatesAsync(userId, cancellationToken);
@@ -94,6 +100,67 @@ public sealed class SpotifyListeningSyncService(
         }
     }
 
+    private async Task<Dictionary<string, SpotifyArtistObject>> TryGetHydratedArtistsByIdAsync(
+        string accessToken,
+        IReadOnlyCollection<string> artistIds,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            var hydratedArtists = await spotifyWebApiClient.GetArtistsByIdsAsync(
+                accessToken,
+                artistIds,
+                cancellationToken);
+
+            return hydratedArtists
+                .Where(artist => !string.IsNullOrWhiteSpace(artist.Id))
+                .ToDictionary(artist => artist.Id!, StringComparer.Ordinal);
+        }
+        catch (SpotifyApiException exception) when (exception.StatusCode == System.Net.HttpStatusCode.Forbidden)
+        {
+            logger.LogWarning(
+                exception,
+                "Spotify artist hydration was forbidden. Continuing sync with simplified artist data. Response body: {ResponseBody}",
+                exception.ResponseBody);
+
+            return new Dictionary<string, SpotifyArtistObject>(StringComparer.Ordinal);
+        }
+    }
+
+    private async Task<Dictionary<string, SpotifyArtistObject>> TryGetTopArtistsByIdAsync(
+        string accessToken,
+        CancellationToken cancellationToken)
+    {
+        var artists = new Dictionary<string, SpotifyArtistObject>(StringComparer.Ordinal);
+
+        foreach (var range in new[] { StatsRange.ShortTerm, StatsRange.MediumTerm, StatsRange.LongTerm })
+        {
+            try
+            {
+                var response = await spotifyWebApiClient.GetTopArtistsAsync(
+                    accessToken,
+                    range,
+                    50,
+                    cancellationToken);
+
+                foreach (var artist in response.Items.Where(artist => !string.IsNullOrWhiteSpace(artist.Id)))
+                {
+                    artists[artist.Id!] = artist;
+                }
+            }
+            catch (SpotifyApiException exception)
+            {
+                logger.LogWarning(
+                    exception,
+                    "Spotify top artists enrichment failed for {Range}. Continuing without that artist metadata. Response body: {ResponseBody}",
+                    range,
+                    exception.ResponseBody);
+            }
+        }
+
+        return artists;
+    }
+
     private static SpotifyPlaybackWriteModel? ToWriteModel(
         SpotifyPlayHistoryObject playHistory,
         SpotifyTrackObject track,
@@ -110,6 +177,8 @@ public sealed class SpotifyListeningSyncService(
                 track.Album.Id,
                 track.Album.Name,
                 track.Album.ReleaseDate,
+                track.Album.AlbumType,
+                track.Album.TotalTracks,
                 SelectImageUrl(track.Album.Images),
                 track.Album.ExternalUrls?.Spotify);
 
@@ -149,6 +218,16 @@ public sealed class SpotifyListeningSyncService(
             playHistory.Context?.Uri);
     }
 
+    private static SpotifyArtistWriteModel ToArtistWriteModel(SpotifyArtistObject artist)
+    {
+        return new SpotifyArtistWriteModel(
+            artist.Id!,
+            artist.Name,
+            artist.Genres.ToArray(),
+            SelectImageUrl(artist.Images),
+            artist.ExternalUrls?.Spotify);
+    }
+
     private static string? SelectImageUrl(IReadOnlyList<SpotifyImageResponse> images)
     {
         return images
@@ -165,8 +244,8 @@ public sealed class SpotifyListeningSyncService(
             syncRun.Status,
             syncRun.FetchedCount,
             syncRun.InsertedCount,
-            syncRun.StartedAt,
-            syncRun.CompletedAt,
+            DbDateTime.ToUtcOffset(syncRun.StartedAt),
+            syncRun.CompletedAt is null ? null : DbDateTime.ToUtcOffset(syncRun.CompletedAt.Value),
             syncRun.ErrorMessage);
     }
 }

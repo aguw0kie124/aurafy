@@ -16,7 +16,7 @@
 
 {#if artists.length > 0}
 	<section class="artist-grid">
-		{#each artists as artist (artist.name)}
+		{#each artists as artist (artist.spotifyArtistId ?? artist.name)}
 			<article>
 				<MediaThumb
 					kind="artist"

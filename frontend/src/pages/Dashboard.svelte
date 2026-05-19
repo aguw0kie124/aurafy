@@ -73,7 +73,7 @@
 
 		{#if artists.length > 0}
 			<ol class="artist-list">
-				{#each artists.slice(0, 3) as artist, index (artist.name)}
+				{#each artists.slice(0, 5) as artist, index (artist.spotifyArtistId ?? artist.name)}
 					<li>
 						<em>{index + 1}</em>
 						<MediaThumb
@@ -101,7 +101,7 @@
 
 		{#if tracks.length > 0}
 			<ul class="track-preview">
-				{#each tracks.slice(0, 3) as track (track.title)}
+				{#each tracks.slice(0, 5) as track (track.spotifyTrackId ?? track.title)}
 					<li>
 						<MediaThumb
 							kind="cover"

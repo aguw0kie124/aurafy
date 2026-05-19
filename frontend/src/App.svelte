@@ -121,7 +121,7 @@
 		statsStatus = 'loading';
 
 		try {
-			await syncListeningHistory();
+			await syncListeningHistory(true);
 			await loadMusicData();
 			statsStatus = 'ready';
 			statsVersion += 1;

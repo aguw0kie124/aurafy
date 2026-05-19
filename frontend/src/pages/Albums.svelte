@@ -13,7 +13,7 @@
 
 {#if albums.length > 0}
 	<section class="album-grid">
-		{#each albums as album (album.title)}
+		{#each albums as album (album.spotifyAlbumId ?? album.title)}
 			<article>
 				<MediaThumb
 					kind="cover"

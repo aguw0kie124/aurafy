@@ -1,4 +1,4 @@
---This file defines the database schema. Paste it into the sql editor in Supabase and run to create tables
+--This file just defines the database schema. Paste it into the sql editor in Supabase and run to create tables
 
 create extension if not exists pgcrypto;
 
@@ -35,10 +35,15 @@ create table if not exists albums (
     spotify_album_id text primary key,
     name text not null,
     release_date text,
+    album_type text,
+    total_tracks integer,
     image_url text,
     external_url text,
     updated_at timestamptz not null default now()
 );
+
+alter table albums add column if not exists album_type text;
+alter table albums add column if not exists total_tracks integer;
 
 create table if not exists tracks (
     spotify_track_id text primary key,

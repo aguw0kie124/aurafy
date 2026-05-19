@@ -49,7 +49,9 @@ public sealed class SpotifyAccountService(
         var tokens = await spotifyAccountRepository.GetTokensAsync(userId, cancellationToken)
             ?? throw new InvalidOperationException($"No Spotify tokens found for app user {userId}.");
 
-        if (tokens.ExpiresAt > DateTimeOffset.UtcNow.Add(ExpiryRefreshBuffer))
+        var expiresAt = DbDateTime.ToUtcOffset(tokens.ExpiresAt);
+
+        if (expiresAt > DateTimeOffset.UtcNow.Add(ExpiryRefreshBuffer))
         {
             return _tokenProtector.Unprotect(tokens.AccessTokenEncrypted);
         }
