@@ -11,6 +11,15 @@ Aurafy is a Spotify listening stats app for seeing your music habits throughout 
 ## Run Locally
 
 1. Add environment values from `.env.example`.
+
+   For Supabase, copy a Postgres connection string from Project Settings -> Database -> Connection string and set:
+
+   ```bash
+   ConnectionStrings__Postgres="Host=...;Port=6543;Database=postgres;Username=postgres.<project-ref>;Password=...;SSL Mode=Require;Trust Server Certificate=true"
+   ```
+
+   Then run `supabase/migrations/0001_initial_schema.sql` in the Supabase SQL editor if the tables are not already created.
+
 2. Install frontend dependencies:
 
    ```bash

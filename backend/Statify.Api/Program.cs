@@ -3,9 +3,12 @@ using System.Text;
 using System.Security.Claims;
 using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Authentication.Cookies;
+using Microsoft.AspNetCore.DataProtection;
 using Microsoft.Extensions.Options;
+using Npgsql;
 using Statify.Api.Configuration;
 using Statify.Api.Contracts;
+using Statify.Api.Data;
 using Statify.Api.Options;
 using Statify.Api.Services;
 
@@ -14,6 +17,7 @@ DevelopmentEnvLoader.Load();
 var builder = WebApplication.CreateBuilder(args);
 
 builder.Services.Configure<SpotifyOptions>(builder.Configuration.GetSection(SpotifyOptions.SectionName));
+builder.Services.AddDataProtection().SetApplicationName("Statify");
 builder.Services
     .AddAuthentication(CookieAuthenticationDefaults.AuthenticationScheme)
     .AddCookie(options =>
@@ -33,6 +37,9 @@ builder.Services
         };
     });
 builder.Services.AddAuthorization();
+builder.Services.AddSingleton<PostgresConnectionFactory>();
+builder.Services.AddScoped<SpotifyAccountRepository>();
+builder.Services.AddScoped<SpotifyAccountService>();
 builder.Services.AddHttpClient<SpotifyAuthService>();
 builder.Services.AddSingleton<FrontendRedirectService>();
 
@@ -92,12 +99,20 @@ app.MapPost("/api/auth/logout", async (HttpContext httpContext) =>
 app.MapGet("/api/auth/spotify/login", (
     HttpResponse response,
     SpotifyAuthService spotifyAuthService,
+    PostgresConnectionFactory postgresConnectionFactory,
     IOptions<SpotifyOptions> spotifyOptions) =>
 {
     if (!spotifyOptions.Value.IsConfigured)
     {
         return Results.Problem(
             "Spotify auth is not configured. Add Spotify__ClientId, Spotify__ClientSecret, and Spotify__RedirectUri.",
+            statusCode: StatusCodes.Status503ServiceUnavailable);
+    }
+
+    if (!postgresConnectionFactory.IsConfigured)
+    {
+        return Results.Problem(
+            "Database is not configured. Add ConnectionStrings__Postgres to .env.",
             statusCode: StatusCodes.Status503ServiceUnavailable);
     }
 
@@ -122,6 +137,7 @@ app.MapGet("/api/auth/spotify/callback", async (
     HttpContext httpContext,
     FrontendRedirectService frontendRedirectService,
     SpotifyAuthService spotifyAuthService,
+    SpotifyAccountService spotifyAccountService,
     CancellationToken cancellationToken) =>
 {
     var request = httpContext.Request;
@@ -161,11 +177,18 @@ app.MapGet("/api/auth/spotify/callback", async (
         var displayName = string.IsNullOrWhiteSpace(spotifyUser.DisplayName)
             ? spotifyUser.Id
             : spotifyUser.DisplayName;
+        var appUser = await spotifyAccountService.UpsertLoggedInUserAsync(
+            spotifyUser,
+            displayName,
+            imageUrl,
+            tokens,
+            cancellationToken);
 
         var claims = new List<Claim>
         {
             new(ClaimTypes.NameIdentifier, spotifyUser.Id),
-            new(ClaimTypes.Name, displayName)
+            new(ClaimTypes.Name, displayName),
+            new("app:user_id", appUser.Id.ToString())
         };
 
         if (!string.IsNullOrWhiteSpace(imageUrl))
@@ -196,6 +219,12 @@ app.MapGet("/api/auth/spotify/callback", async (
             exception.ResponseBody);
 
         return Results.Redirect(frontendRedirectService.LoginError("spotify_auth_failed"));
+    }
+    catch (Exception exception) when (exception is NpgsqlException or InvalidOperationException)
+    {
+        app.Logger.LogError(exception, "Spotify sign-in persistence failed.");
+
+        return Results.Redirect(frontendRedirectService.LoginError("server_error"));
     }
 });
 

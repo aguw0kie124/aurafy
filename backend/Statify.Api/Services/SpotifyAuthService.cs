@@ -68,11 +68,32 @@ public sealed class SpotifyAuthService(
                 body);
         }
 
-        var tokenResponse = JsonSerializer.Deserialize<SpotifyTokenResponse>(body);
+        return DeserializeTokenResponse(body);
+    }
 
-        return tokenResponse ?? throw new SpotifyAuthException(
-            "Spotify returned an empty token response.",
-            body);
+    public async Task<SpotifyTokenResponse> RefreshAccessTokenAsync(
+        string refreshToken,
+        CancellationToken cancellationToken)
+    {
+        using var request = new HttpRequestMessage(HttpMethod.Post, "https://accounts.spotify.com/api/token");
+        request.Headers.Authorization = CreateBasicAuthHeader();
+        request.Content = new FormUrlEncodedContent(new Dictionary<string, string>
+        {
+            ["grant_type"] = "refresh_token",
+            ["refresh_token"] = refreshToken
+        });
+
+        using var response = await httpClient.SendAsync(request, cancellationToken);
+        var body = await response.Content.ReadAsStringAsync(cancellationToken);
+
+        if (!response.IsSuccessStatusCode)
+        {
+            throw new SpotifyAuthException(
+                $"Spotify token refresh failed with status {(int)response.StatusCode}.",
+                body);
+        }
+
+        return DeserializeTokenResponse(body);
     }
 
     public async Task<SpotifyUserProfileResponse> GetCurrentUserAsync(
@@ -109,12 +130,24 @@ public sealed class SpotifyAuthService(
 
         return new AuthenticationHeaderValue("Basic", encodedCredentials);
     }
+
+    private static SpotifyTokenResponse DeserializeTokenResponse(string body)
+    {
+        var tokenResponse = JsonSerializer.Deserialize<SpotifyTokenResponse>(body);
+
+        if (tokenResponse is null || string.IsNullOrWhiteSpace(tokenResponse.AccessToken))
+        {
+            throw new SpotifyAuthException("Spotify returned an invalid token response.", body);
+        }
+
+        return tokenResponse;
+    }
 }
 
 public sealed record SpotifyTokenResponse(
     [property: JsonPropertyName("access_token")] string AccessToken,
-    [property: JsonPropertyName("token_type")] string TokenType,
-    [property: JsonPropertyName("scope")] string Scope,
+    [property: JsonPropertyName("token_type")] string? TokenType,
+    [property: JsonPropertyName("scope")] string? Scope,
     [property: JsonPropertyName("expires_in")] int ExpiresInSeconds,
     [property: JsonPropertyName("refresh_token")] string? RefreshToken);
 
