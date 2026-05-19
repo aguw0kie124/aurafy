@@ -205,7 +205,6 @@ public sealed class SpotifyListeningRepository(PostgresConnectionFactory connect
 
         foreach (var tableName in new[]
         {
-            "daily_user_genre_stats",
             "daily_user_album_stats",
             "daily_user_artist_stats",
             "daily_user_track_stats",
@@ -350,29 +349,6 @@ public sealed class SpotifyListeningRepository(PostgresConnectionFactory connect
                 where pe.user_id = @UserId
                     and t.album_id is not null
                 group by pe.user_id, stat_date, t.album_id;
-                """,
-                parameters,
-                transaction,
-                cancellationToken: cancellationToken));
-
-        await connection.ExecuteAsync(
-            new CommandDefinition(
-                """
-                insert into daily_user_genre_stats (user_id, stat_date, genre, play_count, listening_ms)
-                select
-                    pe.user_id,
-                    (pe.played_at at time zone 'UTC')::date as stat_date,
-                    genre.value as genre,
-                    count(*)::int as play_count,
-                    coalesce(sum(t.duration_ms), 0)::bigint as listening_ms
-                from play_events pe
-                join tracks t on t.spotify_track_id = pe.track_id
-                join track_artists ta on ta.track_id = pe.track_id
-                join artists a on a.spotify_artist_id = ta.artist_id
-                cross join lateral unnest(a.genres) as genre(value)
-                where pe.user_id = @UserId
-                    and genre.value <> ''
-                group by pe.user_id, stat_date, genre.value;
                 """,
                 parameters,
                 transaction,

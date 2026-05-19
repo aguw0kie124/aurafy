@@ -107,6 +107,40 @@ public sealed class SpotifyWebApiClient(HttpClient httpClient, ILogger<SpotifyWe
         return artists;
     }
 
+    public Task<SpotifyArtistObject> GetArtistByIdAsync(
+        string accessToken,
+        string artistId,
+        CancellationToken cancellationToken)
+    {
+        var escapedArtistId = Uri.EscapeDataString(artistId);
+
+        return SendAsync<SpotifyArtistObject>(
+            () => CreateBearerRequest(HttpMethod.Get, $"https://api.spotify.com/v1/artists/{escapedArtistId}", accessToken),
+            cancellationToken);
+    }
+
+    public async Task<IReadOnlyList<SpotifyArtistObject>> SearchArtistsAsync(
+        string accessToken,
+        string query,
+        int limit,
+        CancellationToken cancellationToken)
+    {
+        var url = QueryHelpers.AddQueryString(
+            "https://api.spotify.com/v1/search",
+            new Dictionary<string, string?>
+            {
+                ["q"] = query,
+                ["type"] = "artist",
+                ["limit"] = ClampLimit(limit).ToString(CultureInfo.InvariantCulture)
+            });
+
+        var response = await SendAsync<SpotifyArtistSearchResponse>(
+            () => CreateBearerRequest(HttpMethod.Get, url, accessToken),
+            cancellationToken);
+
+        return response.Artists?.Items ?? [];
+    }
+
     private Task<SpotifyPagingResponse<T>> GetTopItemsAsync<T>(
         string type,
         string accessToken,
@@ -269,6 +303,12 @@ public sealed class SpotifyArtistsResponse
 {
     [JsonPropertyName("artists")]
     public IReadOnlyList<SpotifyArtistObject> Artists { get; init; } = [];
+}
+
+public sealed class SpotifyArtistSearchResponse
+{
+    [JsonPropertyName("artists")]
+    public SpotifyPagingResponse<SpotifyArtistObject>? Artists { get; init; }
 }
 
 public sealed class SpotifyCursorResponse

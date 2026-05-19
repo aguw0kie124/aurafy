@@ -135,12 +135,3 @@ create table if not exists daily_user_album_stats (
     listening_ms bigint not null default 0,
     primary key (user_id, stat_date, album_id)
 );
-
-create table if not exists daily_user_genre_stats (
-    user_id uuid not null references app_users(id) on delete cascade,
-    stat_date date not null,
-    genre text not null,
-    play_count integer not null default 0,
-    listening_ms bigint not null default 0,
-    primary key (user_id, stat_date, genre)
-);

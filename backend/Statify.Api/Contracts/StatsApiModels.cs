@@ -3,7 +3,6 @@ namespace Statify.Api.Contracts;
 public sealed record DashboardSummaryResponse(
     long TotalMinutes,
     int ArtistsDiscovered,
-    string? TopGenre,
     string? CurrentArtist,
     int? CurrentRank,
     string? CurrentArtistImageUrl,
@@ -39,12 +38,6 @@ public sealed record AlbumStatsResponse(
     string? CoverUrl,
     string? ExternalUrl);
 
-public sealed record GenreStatsResponse(
-    string Label,
-    int Value,
-    int Plays,
-    long ListeningMinutes);
-
 public sealed record TimeOfDayStatsResponse(
     string Label,
     int Value,
@@ -55,7 +48,6 @@ public sealed record RecapResponse(
     IReadOnlyList<TrackStatsResponse> TopTracks,
     IReadOnlyList<ArtistStatsResponse> TopArtists,
     IReadOnlyList<AlbumStatsResponse> TopAlbums,
-    IReadOnlyList<GenreStatsResponse> TopGenres,
     IReadOnlyList<TimeOfDayStatsResponse> TimeOfDay);
 
 public sealed record SyncRunResponse(

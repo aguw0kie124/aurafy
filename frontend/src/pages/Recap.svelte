@@ -1,7 +1,7 @@
 <script lang="ts">
 	import EmptyState from '$lib/components/EmptyState.svelte';
 	import MediaThumb from '$lib/components/MediaThumb.svelte';
-	import { artists, dashboardSummary, genres, musicalDna, tracks } from '$lib/data/music';
+	import { artists, dashboardSummary, musicalDna, tracks } from '$lib/data/music';
 </script>
 
 <section class="recap-shell">
@@ -10,7 +10,7 @@
 		<h1>Listening recap</h1>
 	</div>
 
-	{#if tracks.length > 0 || artists.length > 0 || genres.length > 0}
+	{#if tracks.length > 0 || artists.length > 0}
 		<section class="recap-grid">
 			<article>
 				<span>Total minutes</span>
@@ -19,10 +19,6 @@
 			<article>
 				<span>Total plays</span>
 				<strong>{dashboardSummary.totalPlays?.toLocaleString() ?? '0'}</strong>
-			</article>
-			<article>
-				<span>Top genre</span>
-				<strong>{dashboardSummary.topGenre ?? 'No genre yet'}</strong>
 			</article>
 		</section>
 
@@ -79,7 +75,7 @@
 	.recap-grid,
 	.dna-row {
 		display: grid;
-		grid-template-columns: repeat(3, minmax(0, 1fr));
+		grid-template-columns: repeat(2, minmax(0, 1fr));
 		gap: 18px;
 	}
 

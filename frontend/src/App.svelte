@@ -9,7 +9,6 @@
 	import Artists from './pages/Artists.svelte';
 	import Songs from './pages/Songs.svelte';
 	import Albums from './pages/Albums.svelte';
-	import Genres from './pages/Genres.svelte';
 	import Recap from './pages/Recap.svelte';
 	import './app.css';
 
@@ -28,8 +27,7 @@
 		{ label: 'Dashboard', href: '/' },
 		{ label: 'Artists', href: '/artists' },
 		{ label: 'Songs', href: '/songs' },
-		{ label: 'Albums', href: '/albums' },
-		{ label: 'Genres', href: '/genres' }
+		{ label: 'Albums', href: '/albums' }
 	] as const;
 
 	const pages = {
@@ -37,7 +35,6 @@
 		'/artists': Artists,
 		'/songs': Songs,
 		'/albums': Albums,
-		'/genres': Genres,
 		'/recap': Recap
 	} as const;
 

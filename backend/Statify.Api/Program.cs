@@ -315,24 +315,6 @@ statsGroup.MapGet("/albums", async (
     return Results.Ok(albums);
 });
 
-statsGroup.MapGet("/genres", async (
-    ClaimsPrincipal user,
-    StatsRepository statsRepository,
-    string? range,
-    int? limit,
-    CancellationToken cancellationToken) =>
-{
-    if (!TryGetAppUserId(user, out var userId))
-    {
-        return Results.Unauthorized();
-    }
-
-    var startDate = StatsRange.GetStartDate(range, DateTimeOffset.UtcNow);
-    var genres = await statsRepository.GetTopGenresAsync(userId, startDate, limit ?? 12, cancellationToken);
-
-    return Results.Ok(genres);
-});
-
 statsGroup.MapGet("/recap", async (
     ClaimsPrincipal user,
     StatsRepository statsRepository,

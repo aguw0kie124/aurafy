@@ -40,20 +40,6 @@ public sealed class StatsRepository(PostgresConnectionFactory connectionFactory)
                 parameters,
                 cancellationToken: cancellationToken));
 
-        var topGenre = await connection.QuerySingleOrDefaultAsync<string?>(
-            new CommandDefinition(
-                $"""
-                select d.genre
-                from daily_user_genre_stats d
-                where d.user_id = @UserId
-                {filter}
-                group by d.genre
-                order by sum(d.listening_ms) desc, sum(d.play_count) desc, d.genre
-                limit 1;
-                """,
-                parameters,
-                cancellationToken: cancellationToken));
-
         var topArtist = await connection.QuerySingleOrDefaultAsync<TopArtistRecord>(
             new CommandDefinition(
                 $"""
@@ -96,7 +82,6 @@ public sealed class StatsRepository(PostgresConnectionFactory connectionFactory)
         return new DashboardSummaryResponse(
             TotalMinutes: ToMinutes(totals.ListeningMs),
             ArtistsDiscovered: uniqueArtists,
-            TopGenre: topGenre,
             CurrentArtist: topArtist?.Name,
             CurrentRank: topArtist is null ? null : 1,
             CurrentArtistImageUrl: topArtist?.ImageUrl,
@@ -253,55 +238,6 @@ public sealed class StatsRepository(PostgresConnectionFactory connectionFactory)
         return rows.AsList();
     }
 
-    public async Task<IReadOnlyList<GenreStatsResponse>> GetTopGenresAsync(
-        Guid userId,
-        DateTime? startDate,
-        int limit,
-        CancellationToken cancellationToken)
-    {
-        await using var connection = await connectionFactory.OpenConnectionAsync(cancellationToken);
-        var filter = BuildDateFilter("d", startDate);
-
-        var rows = await connection.QueryAsync<GenreStatsResponse>(
-            new CommandDefinition(
-                $"""
-                with stats as (
-                    select
-                        d.genre,
-                        sum(d.play_count)::int as plays,
-                        sum(d.listening_ms)::bigint as listening_ms
-                    from daily_user_genre_stats d
-                    where d.user_id = @UserId
-                    {filter}
-                    group by d.genre
-                ),
-                totals as (
-                    select coalesce(sum(listening_ms), 0)::bigint as total_listening_ms
-                    from stats
-                )
-                select
-                    stats.genre as "Label",
-                    least(
-                        100,
-                        greatest(
-                            1,
-                            round(stats.listening_ms * 100.0 / nullif(totals.total_listening_ms, 0))::int
-                        )
-                    ) as "Value",
-                    stats.plays as "Plays",
-                    round(stats.listening_ms / 60000.0)::bigint as "ListeningMinutes"
-                from stats
-                cross join totals
-                where totals.total_listening_ms > 0
-                order by stats.listening_ms desc, stats.plays desc, stats.genre
-                limit @Limit;
-                """,
-                new { UserId = userId, StartDate = startDate, Limit = ClampLimit(limit) },
-                cancellationToken: cancellationToken));
-
-        return rows.AsList();
-    }
-
     public async Task<IReadOnlyList<TimeOfDayStatsResponse>> GetTimeOfDayStatsAsync(
         Guid userId,
         DateTime? startDate,
@@ -345,10 +281,9 @@ public sealed class StatsRepository(PostgresConnectionFactory connectionFactory)
         var tracks = await GetTopTracksAsync(userId, startDate, 5, cancellationToken);
         var artists = await GetTopArtistsAsync(userId, startDate, 5, cancellationToken);
         var albums = await GetTopAlbumsAsync(userId, startDate, 5, cancellationToken);
-        var genres = await GetTopGenresAsync(userId, startDate, 5, cancellationToken);
         var timeOfDay = await GetTimeOfDayStatsAsync(userId, startDate, cancellationToken);
 
-        return new RecapResponse(summary, tracks, artists, albums, genres, timeOfDay);
+        return new RecapResponse(summary, tracks, artists, albums, timeOfDay);
     }
 
     private static TimeOfDayStatsResponse BuildTimeOfDay(string label, long listeningMs, long totalMs)

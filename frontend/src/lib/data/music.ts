@@ -3,7 +3,6 @@ import { API_BASE_URL } from '$lib/config';
 export type DashboardSummary = {
 	totalMinutes: number | null;
 	artistsDiscovered: number | null;
-	topGenre: string | null;
 	currentArtist: string | null;
 	currentRank: number | null;
 	currentArtistImageUrl: string | null;
@@ -43,15 +42,9 @@ export type Album = {
 	externalUrl?: string | null;
 };
 
-export type TasteMetric = {
+export type TimeOfDayMetric = {
 	label: string;
 	value: number;
-};
-
-export type GenreMetric = {
-	label: string;
-	value: number;
-	plays?: number;
 	listeningMinutes?: number;
 };
 
@@ -76,8 +69,7 @@ type RecapResponse = {
 	topTracks: Track[];
 	topArtists: Artist[];
 	topAlbums: Album[];
-	topGenres: GenreMetric[];
-	timeOfDay: GenreMetric[];
+	timeOfDay: TimeOfDayMetric[];
 };
 
 const DEFAULT_RANGE = 'short_term';
@@ -85,7 +77,6 @@ const DEFAULT_RANGE = 'short_term';
 export const dashboardSummary: DashboardSummary = {
 	totalMinutes: null,
 	artistsDiscovered: null,
-	topGenre: null,
 	currentArtist: null,
 	currentRank: null,
 	currentArtistImageUrl: null
@@ -94,18 +85,15 @@ export const dashboardSummary: DashboardSummary = {
 export const artists: Artist[] = [];
 export const tracks: Track[] = [];
 export const albums: Album[] = [];
-export const tasteProfile: TasteMetric[] = [];
-export const genres: GenreMetric[] = [];
 export const musicalDna: MusicalDnaMetric[] = [];
 
 export async function loadMusicData(range = DEFAULT_RANGE) {
 	const query = `range=${encodeURIComponent(range)}`;
-	const [summary, topTracks, topArtists, topAlbums, topGenres, recap] = await Promise.all([
+	const [summary, topTracks, topArtists, topAlbums, recap] = await Promise.all([
 		fetchJson<DashboardSummary>(`/api/stats/dashboard?${query}`),
 		fetchJson<Track[]>(`/api/stats/tracks?${query}&limit=25`),
 		fetchJson<Artist[]>(`/api/stats/artists?${query}&limit=25`),
 		fetchJson<Album[]>(`/api/stats/albums?${query}&limit=25`),
-		fetchJson<GenreMetric[]>(`/api/stats/genres?${query}&limit=12`),
 		fetchJson<RecapResponse>(`/api/stats/recap?${query}`)
 	]);
 
@@ -113,11 +101,6 @@ export async function loadMusicData(range = DEFAULT_RANGE) {
 	replaceArray(tracks, topTracks.map(normalizeTrack));
 	replaceArray(artists, topArtists);
 	replaceArray(albums, topAlbums.map(normalizeAlbum));
-	replaceArray(genres, topGenres);
-	replaceArray(
-		tasteProfile,
-		topGenres.slice(0, 4).map(({ label, value }) => ({ label, value }))
-	);
 	replaceArray(musicalDna, buildMusicalDna(recap));
 }
 
@@ -182,14 +165,6 @@ function buildMusicalDna(recap: RecapResponse): MusicalDnaMetric[] {
 			label: 'Peak window',
 			value: peakWindow.label,
 			glyph: 'tempo'
-		});
-	}
-
-	if (dashboardSummary.topGenre) {
-		metrics.push({
-			label: 'Top genre',
-			value: dashboardSummary.topGenre,
-			glyph: 'mood'
 		});
 	}
 

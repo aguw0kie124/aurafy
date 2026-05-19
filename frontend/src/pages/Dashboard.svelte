@@ -1,7 +1,7 @@
 <script lang="ts">
 	import EmptyState from '$lib/components/EmptyState.svelte';
 	import MediaThumb from '$lib/components/MediaThumb.svelte';
-	import { artists, dashboardSummary, tasteProfile, tracks } from '$lib/data/music';
+	import { artists, dashboardSummary, tracks } from '$lib/data/music';
 
 	const summaryCards = [
 		{
@@ -11,10 +11,6 @@
 		{
 			label: 'Artists discovered',
 			value: dashboardSummary.artistsDiscovered?.toLocaleString() ?? null
-		},
-		{
-			label: 'Top genre',
-			value: dashboardSummary.topGenre
 		}
 	];
 </script>
@@ -122,28 +118,6 @@
 			<EmptyState title="No track data yet" compact />
 		{/if}
 	</article>
-</section>
-
-<section class="panel taste-panel">
-	<h2>Taste Profile</h2>
-
-	{#if tasteProfile.length > 0}
-		<div class="taste-list">
-			{#each tasteProfile as item (item.label)}
-				<div>
-					<header>
-						<span>{item.label}</span>
-						<strong>{item.value}%</strong>
-					</header>
-					<div class="meter">
-						<span style={`width: ${item.value}%`}></span>
-					</div>
-				</div>
-			{/each}
-		</div>
-	{:else}
-		<EmptyState title="No taste profile yet" compact />
-	{/if}
 </section>
 
 <style>
@@ -266,7 +240,7 @@
 
 	.summary-grid {
 		display: grid;
-		grid-template-columns: repeat(3, minmax(0, 1fr));
+		grid-template-columns: repeat(2, minmax(0, 1fr));
 		gap: 18px;
 	}
 
@@ -364,45 +338,6 @@
 	.track-preview em {
 		color: #e6ebe8;
 		font-style: normal;
-	}
-
-	.taste-panel {
-		margin-top: 28px;
-	}
-
-	.taste-panel h2 {
-		margin-bottom: 22px;
-	}
-
-	.taste-list {
-		display: grid;
-		gap: 22px;
-	}
-
-	.taste-list header {
-		display: flex;
-		justify-content: space-between;
-		gap: 16px;
-		margin-bottom: 12px;
-		text-transform: uppercase;
-	}
-
-	.taste-list strong {
-		color: #71ef9d;
-	}
-
-	.meter {
-		height: 10px;
-		overflow: hidden;
-		border-radius: 999px;
-		background: rgba(255, 255, 255, 0.12);
-	}
-
-	.meter span {
-		display: block;
-		height: 100%;
-		border-radius: inherit;
-		background: #69eb98;
 	}
 
 	@media (max-width: 980px) {

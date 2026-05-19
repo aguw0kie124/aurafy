@@ -55,11 +55,22 @@ public sealed class SpotifyListeningSyncService(
                 artistIds,
                 cancellationToken);
             var topArtistsById = await TryGetTopArtistsByIdAsync(accessToken, cancellationToken);
+            var simpleArtistsById = playbacks
+                .SelectMany(playback => playback.Track.Artists)
+                .Where(artist => !string.IsNullOrWhiteSpace(artist.Id))
+                .GroupBy(artist => artist.Id!, StringComparer.Ordinal)
+                .ToDictionary(group => group.Key, group => group.First(), StringComparer.Ordinal);
 
             foreach (var (artistId, artist) in topArtistsById)
             {
                 hydratedArtistsById[artistId] = artist;
             }
+
+            await SearchMissingArtistMetadataAsync(
+                accessToken,
+                simpleArtistsById,
+                hydratedArtistsById,
+                cancellationToken);
 
             var writeModels = playbacks
                 .Select(playback => ToWriteModel(playback.Item, playback.Track, hydratedArtistsById))
@@ -120,11 +131,48 @@ public sealed class SpotifyListeningSyncService(
         {
             logger.LogWarning(
                 exception,
-                "Spotify artist hydration was forbidden. Continuing sync with simplified artist data. Response body: {ResponseBody}",
+                "Spotify bulk artist hydration was forbidden. Trying single-artist hydration. Response body: {ResponseBody}",
                 exception.ResponseBody);
 
-            return new Dictionary<string, SpotifyArtistObject>(StringComparer.Ordinal);
+            return await TryGetArtistsIndividuallyByIdAsync(
+                accessToken,
+                artistIds,
+                cancellationToken);
         }
+    }
+
+    private async Task<Dictionary<string, SpotifyArtistObject>> TryGetArtistsIndividuallyByIdAsync(
+        string accessToken,
+        IReadOnlyCollection<string> artistIds,
+        CancellationToken cancellationToken)
+    {
+        var artists = new Dictionary<string, SpotifyArtistObject>(StringComparer.Ordinal);
+
+        foreach (var artistId in artistIds)
+        {
+            try
+            {
+                var artist = await spotifyWebApiClient.GetArtistByIdAsync(
+                    accessToken,
+                    artistId,
+                    cancellationToken);
+
+                if (!string.IsNullOrWhiteSpace(artist.Id))
+                {
+                    artists[artist.Id] = artist;
+                }
+            }
+            catch (SpotifyApiException exception)
+            {
+                logger.LogWarning(
+                    exception,
+                    "Spotify single-artist hydration failed for {ArtistId}. Continuing with other artists. Response body: {ResponseBody}",
+                    artistId,
+                    exception.ResponseBody);
+            }
+        }
+
+        return artists;
     }
 
     private async Task<Dictionary<string, SpotifyArtistObject>> TryGetTopArtistsByIdAsync(
@@ -159,6 +207,46 @@ public sealed class SpotifyListeningSyncService(
         }
 
         return artists;
+    }
+
+    private async Task SearchMissingArtistMetadataAsync(
+        string accessToken,
+        IReadOnlyDictionary<string, SpotifySimpleArtistObject> simpleArtistsById,
+        Dictionary<string, SpotifyArtistObject> hydratedArtistsById,
+        CancellationToken cancellationToken)
+    {
+        foreach (var (artistId, simpleArtist) in simpleArtistsById)
+        {
+            if (hydratedArtistsById.TryGetValue(artistId, out var hydratedArtist) &&
+                HasUsefulArtistMetadata(hydratedArtist))
+            {
+                continue;
+            }
+
+            try
+            {
+                var matches = await spotifyWebApiClient.SearchArtistsAsync(
+                    accessToken,
+                    $"artist:{simpleArtist.Name}",
+                    5,
+                    cancellationToken);
+                var match = matches.FirstOrDefault(artist => string.Equals(artist.Id, artistId, StringComparison.Ordinal)) ??
+                    matches.FirstOrDefault(artist => string.Equals(artist.Name, simpleArtist.Name, StringComparison.OrdinalIgnoreCase));
+
+                if (match is not null && HasUsefulArtistMetadata(match))
+                {
+                    hydratedArtistsById[artistId] = match;
+                }
+            }
+            catch (SpotifyApiException exception)
+            {
+                logger.LogWarning(
+                    exception,
+                    "Spotify artist search enrichment failed for {ArtistName}. Continuing with simplified artist data. Response body: {ResponseBody}",
+                    simpleArtist.Name,
+                    exception.ResponseBody);
+            }
+        }
     }
 
     private static SpotifyPlaybackWriteModel? ToWriteModel(
@@ -226,6 +314,11 @@ public sealed class SpotifyListeningSyncService(
             artist.Genres.ToArray(),
             SelectImageUrl(artist.Images),
             artist.ExternalUrls?.Spotify);
+    }
+
+    private static bool HasUsefulArtistMetadata(SpotifyArtistObject artist)
+    {
+        return artist.Genres.Count > 0 || artist.Images.Count > 0;
     }
 
     private static string? SelectImageUrl(IReadOnlyList<SpotifyImageResponse> images)
