@@ -277,13 +277,57 @@ public sealed class StatsRepository(PostgresConnectionFactory connectionFactory)
         DateTime? startDate,
         CancellationToken cancellationToken)
     {
-        var summary = await GetDashboardSummaryAsync(userId, startDate, cancellationToken);
-        var tracks = await GetTopTracksAsync(userId, startDate, 5, cancellationToken);
-        var artists = await GetTopArtistsAsync(userId, startDate, 5, cancellationToken);
-        var albums = await GetTopAlbumsAsync(userId, startDate, 5, cancellationToken);
+        var summary = await GetCapturedSummaryAsync(userId, startDate, cancellationToken);
         var timeOfDay = await GetTimeOfDayStatsAsync(userId, startDate, cancellationToken);
 
-        return new RecapResponse(summary, tracks, artists, albums, timeOfDay);
+        return new RecapResponse(summary, [], [], [], timeOfDay);
+    }
+
+    private async Task<DashboardSummaryResponse> GetCapturedSummaryAsync(
+        Guid userId,
+        DateTime? startDate,
+        CancellationToken cancellationToken)
+    {
+        await using var connection = await connectionFactory.OpenConnectionAsync(cancellationToken);
+
+        var filter = BuildDateFilter("d", startDate);
+        var parameters = new { UserId = userId, StartDate = startDate };
+
+        var totals = await connection.QuerySingleAsync<DashboardTotalsRecord>(
+            new CommandDefinition(
+                $"""
+                select
+                    coalesce(sum(d.play_count), 0)::int as "TotalPlays",
+                    coalesce(sum(d.listening_ms), 0)::bigint as "ListeningMs",
+                    max(d.last_played_at) as "LastPlayedAt"
+                from daily_user_totals d
+                where d.user_id = @UserId
+                {filter};
+                """,
+                parameters,
+                cancellationToken: cancellationToken));
+
+        var lastSyncedAt = await connection.QuerySingleOrDefaultAsync<DateTime?>(
+            new CommandDefinition(
+                """
+                select max(completed_at)
+                from sync_runs
+                where user_id = @UserId
+                    and status = 'completed';
+                """,
+                new { UserId = userId },
+                cancellationToken: cancellationToken));
+
+        return new DashboardSummaryResponse(
+            TotalMinutes: ToMinutes(totals.ListeningMs),
+            ArtistsDiscovered: 0,
+            CurrentArtist: null,
+            CurrentRank: null,
+            CurrentArtistImageUrl: null,
+            TotalPlays: totals.TotalPlays,
+            UniqueTracks: 0,
+            LastPlayedAt: totals.LastPlayedAt is null ? null : DbDateTime.ToUtcOffset(totals.LastPlayedAt.Value),
+            LastSyncedAt: lastSyncedAt is null ? null : DbDateTime.ToUtcOffset(lastSyncedAt.Value));
     }
 
     private static TimeOfDayStatsResponse BuildTimeOfDay(string label, long listeningMs, long totalMs)

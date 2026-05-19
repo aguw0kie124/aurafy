@@ -1,24 +1,31 @@
 import { API_BASE_URL } from '$lib/config';
 
+export type StatsRangeValue = 'short_term' | 'medium_term' | 'long_term';
+
+export const rangeOptions: { label: string; value: StatsRangeValue }[] = [
+	{ label: '4 Weeks', value: 'short_term' },
+	{ label: '6 Months', value: 'medium_term' },
+	{ label: 'All Time', value: 'long_term' }
+];
+
+export type MusicSource = 'spotify' | 'spotify_derived' | 'captured';
+
 export type DashboardSummary = {
 	totalMinutes: number | null;
-	artistsDiscovered: number | null;
 	currentArtist: string | null;
-	currentRank: number | null;
 	currentArtistImageUrl: string | null;
-	totalPlays?: number;
-	uniqueTracks?: number;
-	lastPlayedAt?: string | null;
-	lastSyncedAt?: string | null;
 };
 
 export type Artist = {
 	spotifyArtistId?: string;
 	name: string;
-	plays: number;
+	plays?: number;
 	listeningMinutes?: number;
 	imageUrl: string | null;
 	externalUrl?: string | null;
+	spotifyRank?: number;
+	topTrackCount?: number;
+	source?: MusicSource;
 };
 
 export type Track = {
@@ -26,20 +33,25 @@ export type Track = {
 	title: string;
 	artist: string;
 	album: string;
-	plays: number;
+	plays?: number;
 	listeningMinutes?: number;
 	coverUrl: string | null;
 	externalUrl?: string | null;
+	spotifyRank?: number;
+	source?: MusicSource;
 };
 
 export type Album = {
 	spotifyAlbumId?: string;
 	title: string;
 	artist: string;
-	plays: number;
+	plays?: number;
 	listeningMinutes?: number;
 	coverUrl: string | null;
 	externalUrl?: string | null;
+	spotifyRank?: number;
+	topTrackCount?: number;
+	source?: MusicSource;
 };
 
 export type TimeOfDayMetric = {
@@ -66,19 +78,25 @@ export type SyncRun = {
 
 type RecapResponse = {
 	summary: DashboardSummary;
-	topTracks: Track[];
-	topArtists: Artist[];
-	topAlbums: Album[];
 	timeOfDay: TimeOfDayMetric[];
 };
 
-const DEFAULT_RANGE = 'short_term';
+type SpotifyTopResponse = {
+	range?: StatsRangeValue;
+	Range?: StatsRangeValue;
+	tracks?: Track[];
+	Tracks?: Track[];
+	artists?: Artist[];
+	Artists?: Artist[];
+	albums?: Album[];
+	Albums?: Album[];
+};
+
+const DEFAULT_RANGE: StatsRangeValue = 'short_term';
 
 export const dashboardSummary: DashboardSummary = {
 	totalMinutes: null,
-	artistsDiscovered: null,
 	currentArtist: null,
-	currentRank: null,
 	currentArtistImageUrl: null
 };
 
@@ -87,20 +105,24 @@ export const tracks: Track[] = [];
 export const albums: Album[] = [];
 export const musicalDna: MusicalDnaMetric[] = [];
 
-export async function loadMusicData(range = DEFAULT_RANGE) {
+let latestMusicRequestId = 0;
+
+export async function loadMusicData(range: StatsRangeValue = DEFAULT_RANGE) {
+	const requestId = ++latestMusicRequestId;
 	const query = `range=${encodeURIComponent(range)}`;
-	const [summary, topTracks, topArtists, topAlbums, recap] = await Promise.all([
-		fetchJson<DashboardSummary>(`/api/stats/dashboard?${query}`),
-		fetchJson<Track[]>(`/api/stats/tracks?${query}&limit=25`),
-		fetchJson<Artist[]>(`/api/stats/artists?${query}&limit=25`),
-		fetchJson<Album[]>(`/api/stats/albums?${query}&limit=25`),
-		fetchJson<RecapResponse>(`/api/stats/recap?${query}`)
+	const [recap, spotifyTop] = await Promise.all([
+		fetchJson<RecapResponse>(`/api/stats/recap?${query}`).catch(() => createEmptyRecap()),
+		fetchJson<SpotifyTopResponse>(`/api/spotify/top?${query}&limit=50`)
 	]);
 
-	Object.assign(dashboardSummary, summary);
-	replaceArray(tracks, topTracks.map(normalizeTrack));
-	replaceArray(artists, topArtists);
-	replaceArray(albums, topAlbums.map(normalizeAlbum));
+	if (requestId !== latestMusicRequestId) {
+		return;
+	}
+
+	Object.assign(dashboardSummary, recap.summary ?? createEmptyDashboardSummary());
+	replaceArray(tracks, spotifyTop.tracks ?? spotifyTop.Tracks ?? []);
+	replaceArray(artists, spotifyTop.artists ?? spotifyTop.Artists ?? []);
+	replaceArray(albums, spotifyTop.albums ?? spotifyTop.Albums ?? []);
 	replaceArray(musicalDna, buildMusicalDna(recap));
 }
 
@@ -131,17 +153,18 @@ function replaceArray<T>(target: T[], next: T[]) {
 	target.splice(0, target.length, ...next);
 }
 
-function normalizeTrack(track: Track): Track {
+function createEmptyDashboardSummary(): DashboardSummary {
 	return {
-		...track,
-		album: track.album ?? 'Unknown album'
+		totalMinutes: null,
+		currentArtist: null,
+		currentArtistImageUrl: null
 	};
 }
 
-function normalizeAlbum(album: Album): Album {
+function createEmptyRecap(): RecapResponse {
 	return {
-		...album,
-		artist: album.artist ?? 'Unknown artist'
+		summary: createEmptyDashboardSummary(),
+		timeOfDay: []
 	};
 }
 

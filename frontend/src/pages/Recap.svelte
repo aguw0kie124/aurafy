@@ -1,7 +1,6 @@
 <script lang="ts">
 	import {
 		BarChart3,
-		Clock3,
 		ExternalLink,
 		Headphones,
 		ListMusic,
@@ -12,10 +11,18 @@
 	} from '@lucide/svelte';
 	import EmptyState from '$lib/components/EmptyState.svelte';
 	import MediaThumb from '$lib/components/MediaThumb.svelte';
-	import { albums, artists, dashboardSummary, musicalDna, tracks } from '$lib/data/music';
+	import RangeTabs from '$lib/components/RangeTabs.svelte';
+	import {
+		albums,
+		artists,
+		dashboardSummary,
+		musicalDna,
+		rangeOptions,
+		tracks,
+		type StatsRangeValue
+	} from '$lib/data/music';
 
 	type RecapTab = 'tracks' | 'artists' | 'albums';
-	type SortMode = 'plays' | 'minutes';
 
 	type RecapItem = {
 		id: string;
@@ -24,9 +31,10 @@
 		imageRound: boolean;
 		title: string;
 		subtitle: string;
-		plays: number;
-		minutes: number;
 		externalUrl: string | null;
+		spotifyRank?: number;
+		topTrackCount?: number;
+		source: 'spotify' | 'spotify_derived';
 	};
 
 	const numberFormatter = new Intl.NumberFormat('en-US');
@@ -37,32 +45,22 @@
 		{ id: 'albums', label: 'Albums' }
 	] as const;
 
-	const sortOptions = [
-		{ id: 'plays', label: 'Plays' },
-		{ id: 'minutes', label: 'Minutes' }
-	] as const;
+	let {
+		activeRange = 'short_term',
+		onRangeChange = () => {}
+	}: {
+		activeRange?: StatsRangeValue;
+		onRangeChange?: (range: StatsRangeValue) => void;
+	} = $props();
 
 	let activeTab = $state<RecapTab>('tracks');
-	let sortMode = $state<SortMode>('plays');
 	let selectedId = $state<string | null>(null);
 
 	const topTrack = $derived(tracks[0] ?? null);
 	const topArtist = $derived(artists[0] ?? null);
-	const totalPlays = $derived(
-		dashboardSummary.totalPlays ?? tracks.reduce((sum, track) => sum + track.plays, 0)
-	);
-	const totalMinutes = $derived(
-		dashboardSummary.totalMinutes ??
-			tracks.reduce((sum, track) => sum + (track.listeningMinutes ?? 0), 0)
-	);
-	const uniqueTracks = $derived(dashboardSummary.uniqueTracks ?? tracks.length);
 	const resolvedTab = $derived.by(() => resolveTab(activeTab));
 	const activeTabItems = $derived.by(() => getItems(resolvedTab));
-	const hasMinuteMetrics = $derived(activeTabItems.some((item) => item.minutes > 0));
-	const resolvedSortMode = $derived(
-		sortMode === 'minutes' && hasMinuteMetrics ? 'minutes' : 'plays'
-	);
-	const rankedItems = $derived.by(() => rankItems(activeTabItems, resolvedSortMode));
+	const rankedItems = $derived.by(() => rankItems(activeTabItems));
 	const selectedItem = $derived(
 		rankedItems.find((item) => item.id === selectedId) ?? rankedItems[0] ?? null
 	);
@@ -80,26 +78,29 @@
 	const activeTabLabel = $derived(
 		tabOptions.find((option) => option.id === resolvedTab)?.label ?? 'Tracks'
 	);
+	const activeRangeLabel = $derived(
+		rangeOptions.find((option) => option.value === activeRange)?.label ?? '4 Weeks'
+	);
 	const summaryCards = $derived([
 		{
-			label: 'Minutes',
-			value: formatNumber(totalMinutes),
-			icon: Clock3
+			label: 'Top Track',
+			value: topTrack?.title ?? 'No data yet',
+			icon: Music2
 		},
 		{
-			label: 'Plays',
-			value: formatNumber(totalPlays),
-			icon: Headphones
-		},
-		{
-			label: 'Artist',
+			label: 'Top Artist',
 			value: topArtist?.name ?? dashboardSummary.currentArtist ?? 'No data yet',
 			icon: Trophy
 		},
 		{
 			label: 'Tracks',
-			value: formatNumber(uniqueTracks),
+			value: formatNumber(tracks.length),
 			icon: ListMusic
+		},
+		{
+			label: 'Albums',
+			value: formatNumber(albums.length),
+			icon: BarChart3
 		}
 	]);
 
@@ -120,9 +121,10 @@
 				imageRound: true,
 				title: artist.name,
 				subtitle: 'Artist',
-				plays: artist.plays,
-				minutes: artist.listeningMinutes ?? 0,
-				externalUrl: artist.externalUrl ?? null
+				externalUrl: artist.externalUrl ?? null,
+				spotifyRank: artist.spotifyRank,
+				topTrackCount: artist.topTrackCount,
+				source: artist.source === 'spotify_derived' ? 'spotify_derived' : 'spotify'
 			}));
 		}
 
@@ -134,9 +136,10 @@
 				imageRound: false,
 				title: album.title,
 				subtitle: album.artist,
-				plays: album.plays,
-				minutes: album.listeningMinutes ?? 0,
-				externalUrl: album.externalUrl ?? null
+				externalUrl: album.externalUrl ?? null,
+				spotifyRank: album.spotifyRank,
+				topTrackCount: album.topTrackCount,
+				source: 'spotify_derived'
 			}));
 		}
 
@@ -147,26 +150,38 @@
 			imageRound: false,
 			title: track.title,
 			subtitle: track.artist,
-			plays: track.plays,
-			minutes: track.listeningMinutes ?? 0,
-			externalUrl: track.externalUrl ?? null
+			externalUrl: track.externalUrl ?? null,
+			spotifyRank: track.spotifyRank,
+			source: 'spotify'
 		}));
 	}
 
-	function rankItems(items: RecapItem[], mode: SortMode) {
-		return [...items].sort((a, b) => getMetricValue(b, mode) - getMetricValue(a, mode)).slice(0, 6);
-	}
+	function rankItems(items: RecapItem[]) {
+		return [...items]
+			.sort((a, b) => {
+				const rankA = a.spotifyRank ?? Number.POSITIVE_INFINITY;
+				const rankB = b.spotifyRank ?? Number.POSITIVE_INFINITY;
 
-	function getMetricValue(item: RecapItem, mode = resolvedSortMode) {
-		return mode === 'minutes' ? item.minutes : item.plays;
+				if (rankA !== rankB) {
+					return rankA - rankB;
+				}
+
+				return a.title.localeCompare(b.title);
+			})
+			.slice(0, 6);
 	}
 
 	function getMetricLabel(item: RecapItem) {
-		if (resolvedSortMode === 'minutes') {
-			return formatMinutes(item.minutes);
+		if (item.topTrackCount) {
+			const trackLabel = item.topTrackCount === 1 ? 'top track' : 'top tracks';
+			return `#${item.spotifyRank ?? '--'} • ${formatNumber(item.topTrackCount)} ${trackLabel}`;
 		}
 
-		return `${formatNumber(item.plays)} plays`;
+		if (item.spotifyRank) {
+			return `#${item.spotifyRank}`;
+		}
+
+		return 'Spotify';
 	}
 
 	function getTabCount(tab: RecapTab) {
@@ -182,8 +197,8 @@
 		return numberFormatter.format(value ?? 0);
 	}
 
-	function formatMinutes(value: number | null | undefined) {
-		return `${formatNumber(value ?? 0)} min`;
+	function formatSource(item: RecapItem) {
+		return item.source === 'spotify_derived' ? 'From top tracks' : 'Spotify';
 	}
 </script>
 
@@ -211,6 +226,10 @@
 			<div class="hero-copy">
 				<p class="eyebrow">Top Track</p>
 				<h1>{heroTitle}</h1>
+				<div class="hero-range">
+					<span>{activeRangeLabel}</span>
+					<RangeTabs active={activeRange} onSelect={onRangeChange} />
+				</div>
 			</div>
 		</section>
 
@@ -248,20 +267,7 @@
 						{/each}
 					</div>
 
-					<div class="sort-toggle" aria-label="Sort leaderboard">
-						{#each sortOptions as option (option.id)}
-							<button
-								type="button"
-								class:active={resolvedSortMode === option.id}
-								disabled={option.id === 'minutes' && !hasMinuteMetrics}
-								onclick={() => {
-									sortMode = option.id;
-								}}
-							>
-								{option.label}
-							</button>
-						{/each}
-					</div>
+					<div class="source-pill" aria-label="Stats source">Rank</div>
 				</div>
 			</div>
 
@@ -331,12 +337,12 @@
 
 						<dl>
 							<div>
-								<dt>Plays</dt>
-								<dd>{formatNumber(selectedItem.plays)}</dd>
+								<dt>Rank</dt>
+								<dd>{selectedItem.spotifyRank ? `#${selectedItem.spotifyRank}` : '--'}</dd>
 							</div>
 							<div>
-								<dt>Minutes</dt>
-								<dd>{formatMinutes(selectedItem.minutes)}</dd>
+								<dt>Source</dt>
+								<dd>{formatSource(selectedItem)}</dd>
 							</div>
 						</dl>
 
@@ -484,6 +490,19 @@
 		text-wrap: balance;
 	}
 
+	.hero-range {
+		display: flex;
+		align-items: center;
+		flex-wrap: wrap;
+		gap: 12px;
+		margin-top: 10px;
+	}
+
+	.hero-range > span {
+		color: #b3b3b3;
+		font-weight: 800;
+	}
+
 	.metric-strip,
 	.dna-row {
 		display: grid;
@@ -571,7 +590,7 @@
 	}
 
 	.category-toggle,
-	.sort-toggle {
+	.source-pill {
 		display: flex;
 		align-items: center;
 		gap: 4px;
@@ -581,12 +600,15 @@
 		background: #181818;
 	}
 
-	.sort-toggle {
+	.source-pill {
 		justify-self: end;
+		min-height: 38px;
+		padding-inline: 14px;
+		color: #b3b3b3;
+		font-weight: 800;
 	}
 
-	.category-toggle button,
-	.sort-toggle button {
+	.category-toggle button {
 		display: inline-flex;
 		min-height: 32px;
 		align-items: center;
@@ -603,19 +625,16 @@
 			color 160ms ease;
 	}
 
-	.category-toggle button:hover:not(:disabled),
-	.sort-toggle button:hover:not(:disabled) {
+	.category-toggle button:hover:not(:disabled) {
 		color: #fff;
 	}
 
-	.category-toggle button.active,
-	.sort-toggle button.active {
+	.category-toggle button.active {
 		background: #fff;
 		color: #121212;
 	}
 
-	.category-toggle button:disabled,
-	.sort-toggle button:disabled {
+	.category-toggle button:disabled {
 		cursor: not-allowed;
 		opacity: 0.42;
 	}
@@ -843,12 +862,15 @@
 
 		.control-row,
 		.category-toggle,
-		.sort-toggle {
+		.source-pill {
 			width: 100%;
 		}
 
-		.category-toggle button,
-		.sort-toggle button {
+		.source-pill {
+			justify-content: center;
+		}
+
+		.category-toggle button {
 			flex: 1;
 			min-width: 0;
 			padding-inline: 10px;

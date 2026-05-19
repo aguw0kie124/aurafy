@@ -4,123 +4,76 @@
 	import MediaThumb from '$lib/components/MediaThumb.svelte';
 	import RangeTabs from '$lib/components/RangeTabs.svelte';
 	import SectionHeading from '$lib/components/SectionHeading.svelte';
-	import { artists } from '$lib/data/music';
+	import { artists, rangeOptions, type StatsRangeValue } from '$lib/data/music';
+
+	let {
+		activeRange = 'short_term',
+		onRangeChange = () => {}
+	}: {
+		activeRange?: StatsRangeValue;
+		onRangeChange?: (range: StatsRangeValue) => void;
+	} = $props();
 
 	let selectedId = $state<string | null>(null);
 
-	const selectedArtist = $derived(
-		artists.find((artist, index) => getArtistId(artist, index) === selectedId) ?? artists[0] ?? null
+	const activeRangeLabel = $derived(
+		rangeOptions.find((option) => option.value === activeRange)?.label ?? '4 Weeks'
 	);
 
 	function getArtistId(artist: (typeof artists)[number], index: number) {
 		return artist.spotifyArtistId ?? `${artist.name}-${index}`;
 	}
 
-	function formatNumber(value: number | null | undefined) {
-		return (value ?? 0).toLocaleString();
-	}
-
-	function formatMinutes(value: number | null | undefined) {
-		return `${formatNumber(value)} min`;
+	function getArtistMetric(artist: (typeof artists)[number]) {
+		return artist.spotifyRank ? `#${artist.spotifyRank}` : 'Spotify';
 	}
 </script>
 
 <section class="page-header">
-	<SectionHeading
-		title="Top Artists"
-		subtitle="Your most played artists across all listening sessions."
-	/>
-	<RangeTabs active="6 Months" />
+	<SectionHeading title="Top Artists" subtitle={`Spotify: ${activeRangeLabel}.`} />
+	<RangeTabs active={activeRange} onSelect={onRangeChange} />
 </section>
 
 {#if artists.length > 0}
-	<section class="list-layout">
-		<div class="ranked-panel" aria-label="Ranked artist list">
-			{#each artists as artist, index (getArtistId(artist, index))}
-				{@const artistId = getArtistId(artist, index)}
-				<div class="rank-row" class:selected={selectedArtist === artist}>
-					<button
-						type="button"
-						class="rank-main"
-						aria-pressed={selectedArtist === artist}
-						onclick={() => {
-							selectedId = artistId;
-						}}
-					>
-						<span class="rank-number">{index + 1}</span>
-						<MediaThumb
-							kind="artist"
-							src={artist.imageUrl}
-							alt={`${artist.name} artist image`}
-							size="small"
-							round
-							label={artist.name}
-						/>
-						<span class="rank-copy">
-							<strong>{artist.name}</strong>
-							<small>Artist</small>
-						</span>
-						<span class="rank-meta">{formatNumber(artist.plays)} plays</span>
-					</button>
+	<section class="artist-grid">
+		{#each artists as artist, index (getArtistId(artist, index))}
+			{@const artistId = getArtistId(artist, index)}
+			<article class:selected={selectedId === artistId}>
+				<button
+					type="button"
+					class="card-main"
+					aria-pressed={selectedId === artistId}
+					onclick={() => {
+						selectedId = artistId;
+					}}
+				>
+					<MediaThumb
+						kind="artist"
+						src={artist.imageUrl}
+						alt={`${artist.name} artist image`}
+						size="large"
+						round
+						label={artist.name}
+					/>
+					<span class="card-copy">
+						<strong>{artist.name}</strong>
+						<small>{getArtistMetric(artist)}</small>
+					</span>
+				</button>
 
-					{#if artist.externalUrl}
-						<a
-							class="icon-button"
-							href={artist.externalUrl}
-							target="_blank"
-							rel="noreferrer noopener"
-							aria-label={`Open ${artist.name} in Spotify`}
-						>
-							<ExternalLink size={18} strokeWidth={2.2} />
-						</a>
-					{:else}
-						<span class="icon-button unavailable" aria-hidden="true">
-							<ExternalLink size={18} strokeWidth={2.2} />
-						</span>
-					{/if}
-				</div>
-			{/each}
-		</div>
-
-		<aside class="detail-panel" aria-label="Selected artist">
-			{#if selectedArtist}
-				<MediaThumb
-					kind="artist"
-					src={selectedArtist.imageUrl}
-					alt={`${selectedArtist.name} artist image`}
-					size="large"
-					round
-					label={selectedArtist.name}
-				/>
-				<div class="detail-copy">
-					<h2>{selectedArtist.name}</h2>
-					<p>Artist</p>
-				</div>
-
-				<dl>
-					<div>
-						<dt>Plays</dt>
-						<dd>{formatNumber(selectedArtist.plays)}</dd>
-					</div>
-					<div>
-						<dt>Minutes</dt>
-						<dd>{formatMinutes(selectedArtist.listeningMinutes)}</dd>
-					</div>
-				</dl>
-
-				{#if selectedArtist.externalUrl}
+				{#if artist.externalUrl}
 					<a
-						class="spotify-link"
-						href={selectedArtist.externalUrl}
+						class="spotify-open"
+						href={artist.externalUrl}
 						target="_blank"
 						rel="noreferrer noopener"
+						aria-label={`Open ${artist.name} in Spotify`}
 					>
-						Open in Spotify
-						<ExternalLink size={17} strokeWidth={2.3} />
+						<ExternalLink size={17} strokeWidth={2.2} />
 					</a>
 				{/if}
-			{/if}
-		</aside>
+			</article>
+		{/each}
 	</section>
 {:else}
 	<EmptyState title="No artist data yet" />
@@ -135,196 +88,94 @@
 		margin-bottom: 34px;
 	}
 
-	.list-layout {
+	.artist-grid {
 		display: grid;
-		grid-template-columns: minmax(0, 1fr) minmax(280px, 360px);
-		gap: 12px;
-		align-items: start;
+		grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
+		gap: 16px;
 	}
 
-	.ranked-panel {
+	article {
+		position: relative;
 		display: grid;
-		overflow: hidden;
 		border-radius: 8px;
-		background: #121212;
+		background: #181818;
+		transition:
+			background 160ms ease,
+			transform 160ms ease;
 	}
 
-	.rank-row {
+	article:hover,
+	article.selected {
+		background: #242424;
+	}
+
+	article.selected {
+		box-shadow: inset 0 0 0 1px rgba(30, 215, 96, 0.55);
+	}
+
+	.card-main {
 		display: grid;
-		grid-template-columns: minmax(0, 1fr) 48px;
-		align-items: stretch;
-		border-bottom: 1px solid rgba(255, 255, 255, 0.055);
-		transition: background 160ms ease;
-	}
-
-	.rank-row:last-child {
-		border-bottom: 0;
-	}
-
-	.rank-row:hover,
-	.rank-row.selected {
-		background: #232323;
-	}
-
-	.rank-row.selected {
-		box-shadow: inset 3px 0 0 #1ed760;
-	}
-
-	.rank-main {
-		display: grid;
-		grid-template-columns: 42px 48px minmax(150px, 1fr) minmax(100px, 150px);
-		align-items: center;
 		gap: 14px;
+		justify-items: center;
 		min-width: 0;
-		min-height: 72px;
-		padding: 10px 14px 10px 18px;
+		padding: 18px;
 		border: 0;
 		background: transparent;
 		color: inherit;
-		text-align: left;
+		text-align: center;
 		cursor: pointer;
 	}
 
-	.rank-number {
-		color: #a7a7a7;
-		font-weight: 800;
-		text-align: center;
-	}
-
-	.rank-copy {
+	.card-copy {
 		display: grid;
 		min-width: 0;
-		gap: 4px;
+		gap: 5px;
+		width: 100%;
 	}
 
-	.rank-copy strong,
-	.rank-copy small,
-	.rank-meta {
+	.card-copy strong,
+	.card-copy small {
 		min-width: 0;
 		overflow: hidden;
 		text-overflow: ellipsis;
 		white-space: nowrap;
 	}
 
-	.rank-copy small,
-	.rank-meta {
+	.card-copy strong {
+		font-size: 1rem;
+	}
+
+	.card-copy small {
 		color: #a7a7a7;
+		font-weight: 700;
 	}
 
-	.rank-meta {
-		justify-self: end;
-	}
-
-	.icon-button {
+	.spotify-open {
+		position: absolute;
+		right: 10px;
+		top: 10px;
 		display: grid;
-		width: 48px;
-		min-height: 72px;
+		width: 34px;
+		height: 34px;
 		place-items: center;
-		color: #b3b3b3;
+		border-radius: 999px;
+		background: rgba(0, 0, 0, 0.42);
+		color: #fff;
+		opacity: 0;
 		transition:
-			color 160ms ease,
+			opacity 160ms ease,
 			background 160ms ease;
 	}
 
-	.icon-button:hover {
-		background: rgba(255, 255, 255, 0.05);
-		color: #fff;
+	article:hover .spotify-open,
+	article.selected .spotify-open,
+	.spotify-open:focus-visible {
+		opacity: 1;
 	}
 
-	.icon-button.unavailable {
-		opacity: 0.25;
-	}
-
-	.detail-panel {
-		position: sticky;
-		top: 96px;
-		display: grid;
-		justify-items: start;
-		gap: 18px;
-		padding: 20px;
-		border-radius: 8px;
-		background: #181818;
-	}
-
-	.detail-copy {
-		display: grid;
-		gap: 6px;
-		min-width: 0;
-	}
-
-	.detail-copy h2,
-	.detail-copy p {
-		margin: 0;
-	}
-
-	.detail-copy h2 {
-		font-size: clamp(1.35rem, 2vw, 1.85rem);
-		line-height: 1.05;
-		overflow-wrap: anywhere;
-	}
-
-	.detail-copy p {
-		color: #b3b3b3;
-	}
-
-	dl {
-		display: grid;
-		width: 100%;
-		grid-template-columns: repeat(2, minmax(0, 1fr));
-		gap: 10px;
-		margin: 0;
-	}
-
-	dl div {
-		display: grid;
-		gap: 6px;
-		padding: 12px;
-		border-radius: 8px;
-		background: #121212;
-	}
-
-	dt {
-		color: #a7a7a7;
-		font-size: 0.74rem;
-		font-weight: 800;
-		text-transform: uppercase;
-	}
-
-	dd {
-		margin: 0;
-		font-size: 1.2rem;
-		font-weight: 800;
-	}
-
-	.spotify-link {
-		display: inline-flex;
-		align-items: center;
-		justify-content: center;
-		gap: 8px;
-		min-height: 42px;
-		padding: 0 18px;
-		border-radius: 999px;
+	.spotify-open:hover {
 		background: #1ed760;
 		color: #071108;
-		font-weight: 900;
-		transition:
-			background 160ms ease,
-			transform 160ms ease;
-	}
-
-	.spotify-link:hover {
-		background: #3be477;
-		transform: translateY(-1px);
-	}
-
-	@media (max-width: 980px) {
-		.list-layout {
-			grid-template-columns: 1fr;
-		}
-
-		.detail-panel {
-			position: static;
-		}
 	}
 
 	@media (max-width: 760px) {
@@ -333,19 +184,14 @@
 			flex-direction: column;
 		}
 
-		.rank-row {
-			grid-template-columns: minmax(0, 1fr) 44px;
+		.artist-grid {
+			grid-template-columns: repeat(2, minmax(0, 1fr));
 		}
+	}
 
-		.rank-main {
-			grid-template-columns: 30px 48px minmax(0, 1fr);
-			gap: 12px;
-			padding-left: 12px;
-		}
-
-		.rank-meta {
-			grid-column: 3;
-			justify-self: start;
+	@media (max-width: 520px) {
+		.artist-grid {
+			grid-template-columns: 1fr;
 		}
 	}
 </style>

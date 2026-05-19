@@ -43,6 +43,7 @@ builder.Services.AddScoped<SpotifyListeningRepository>();
 builder.Services.AddScoped<StatsRepository>();
 builder.Services.AddScoped<SpotifyAccountService>();
 builder.Services.AddScoped<SpotifyListeningSyncService>();
+builder.Services.AddScoped<SpotifyTopItemsService>();
 builder.Services.AddHttpClient<SpotifyAuthService>();
 builder.Services.AddHttpClient<SpotifyWebApiClient>();
 builder.Services.AddSingleton<FrontendRedirectService>();
@@ -375,10 +376,10 @@ spotifyGroup.MapGet("/me", async (
     return Results.Ok(profile);
 });
 
-spotifyGroup.MapGet("/top/tracks", async (
+spotifyGroup.MapGet("/top", async (
     ClaimsPrincipal user,
     SpotifyAccountService spotifyAccountService,
-    SpotifyWebApiClient spotifyWebApiClient,
+    SpotifyTopItemsService spotifyTopItemsService,
     string? range,
     int? limit,
     CancellationToken cancellationToken) =>
@@ -389,36 +390,13 @@ spotifyGroup.MapGet("/top/tracks", async (
     }
 
     var accessToken = await spotifyAccountService.GetValidAccessTokenAsync(userId, cancellationToken);
-    var tracks = await spotifyWebApiClient.GetTopTracksAsync(
+    var topItems = await spotifyTopItemsService.GetTopItemsAsync(
         accessToken,
-        StatsRange.Normalize(range),
-        limit ?? 20,
+        range,
+        limit ?? 50,
         cancellationToken);
 
-    return Results.Ok(tracks);
-});
-
-spotifyGroup.MapGet("/top/artists", async (
-    ClaimsPrincipal user,
-    SpotifyAccountService spotifyAccountService,
-    SpotifyWebApiClient spotifyWebApiClient,
-    string? range,
-    int? limit,
-    CancellationToken cancellationToken) =>
-{
-    if (!TryGetAppUserId(user, out var userId))
-    {
-        return Results.Unauthorized();
-    }
-
-    var accessToken = await spotifyAccountService.GetValidAccessTokenAsync(userId, cancellationToken);
-    var artists = await spotifyWebApiClient.GetTopArtistsAsync(
-        accessToken,
-        StatsRange.Normalize(range),
-        limit ?? 20,
-        cancellationToken);
-
-    return Results.Ok(artists);
+    return Results.Ok(topItems);
 });
 
 app.Run();

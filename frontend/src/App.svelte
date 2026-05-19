@@ -3,7 +3,12 @@
 	import { LogIn, LogOut, RefreshCw } from '@lucide/svelte';
 	import MediaThumb from '$lib/components/MediaThumb.svelte';
 	import { API_BASE_URL } from '$lib/config';
-	import { loadMusicData, syncListeningHistory } from '$lib/data/music';
+	import {
+		loadMusicData,
+		rangeOptions,
+		syncListeningHistory,
+		type StatsRangeValue
+	} from '$lib/data/music';
 	import favicon from '$lib/assets/favicon.svg';
 	import Artists from './pages/Artists.svelte';
 	import Songs from './pages/Songs.svelte';
@@ -51,15 +56,24 @@
 	let statsVersion = $state(0);
 	let syncing = $state(false);
 	let profileMenuOpen = $state(false);
+	let selectedRange = $state<StatsRangeValue>(getRangeFromUrl());
+	let statsRequestId = 0;
 
 	const isAuthenticated = $derived(authStatus === 'authenticated' && user !== null);
+	const selectedRangeLabel = $derived(
+		rangeOptions.find((option) => option.value === selectedRange)?.label ?? '4 Weeks'
+	);
 
 	onMount(() => {
 		void loadSession();
 
 		const handlePopState = () => {
 			currentUrl = new URL(window.location.href);
+			selectedRange = getRangeFromUrl();
 			profileMenuOpen = false;
+			if (isAuthenticated) {
+				void loadStats(selectedRange);
+			}
 		};
 
 		const handleWindowClick = () => {
@@ -100,7 +114,7 @@
 			if (data.authenticated && data.user) {
 				user = data.user;
 				authStatus = 'authenticated';
-				void loadStats();
+				void loadStats(selectedRange);
 				return;
 			}
 
@@ -113,16 +127,33 @@
 		}
 	}
 
-	async function loadStats() {
+	async function loadStats(range = selectedRange) {
+		const requestId = ++statsRequestId;
 		statsStatus = 'loading';
 
 		try {
-			await loadMusicData();
+			await loadMusicData(range);
+			if (requestId !== statsRequestId) {
+				return;
+			}
 			statsStatus = 'ready';
 			statsVersion += 1;
 		} catch {
+			if (requestId !== statsRequestId) {
+				return;
+			}
 			statsStatus = 'error';
 		}
+	}
+
+	async function changeRange(range: StatsRangeValue) {
+		if (selectedRange === range && statsStatus === 'ready') {
+			return;
+		}
+
+		selectedRange = range;
+		updateRangeInUrl(range);
+		await loadStats(range);
 	}
 
 	function startSpotifyLogin() {
@@ -135,7 +166,7 @@
 
 		try {
 			await syncListeningHistory(true);
-			await loadMusicData();
+			await loadMusicData(selectedRange);
 			statsStatus = 'ready';
 			statsVersion += 1;
 		} catch {
@@ -161,7 +192,27 @@
 
 	function navigate(path: string) {
 		profileMenuOpen = false;
-		window.history.pushState({}, '', path);
+		window.history.pushState({}, '', withRange(path, selectedRange));
+		currentUrl = new URL(window.location.href);
+	}
+
+	function getRangeFromUrl(): StatsRangeValue {
+		const range = new URL(window.location.href).searchParams.get('range');
+		return rangeOptions.some((option) => option.value === range)
+			? (range as StatsRangeValue)
+			: 'short_term';
+	}
+
+	function withRange(path: string, range: StatsRangeValue) {
+		const url = new URL(path, window.location.origin);
+		url.searchParams.set('range', range);
+		return `${url.pathname}${url.search}`;
+	}
+
+	function updateRangeInUrl(range: StatsRangeValue) {
+		const url = new URL(window.location.href);
+		url.searchParams.set('range', range);
+		window.history.replaceState({}, '', `${url.pathname}${url.search}`);
 		currentUrl = new URL(window.location.href);
 	}
 </script>
@@ -229,8 +280,8 @@
 				<div class="tools">
 					<button
 						type="button"
-						aria-label={syncing ? 'Refreshing stats' : 'Refresh stats'}
-						title="Refresh stats"
+						aria-label={syncing ? 'Syncing captured history' : 'Sync captured history'}
+						title="Sync captured history"
 						disabled={syncing}
 						onclick={refreshStats}
 					>
@@ -289,10 +340,12 @@
 		<main class="page-shell app-main">
 			{#if statsStatus === 'error'}
 				<p class="stats-error">Stats could not load. Try refreshing.</p>
+			{:else if statsStatus === 'loading'}
+				<p class="stats-loading">Loading {selectedRangeLabel}...</p>
 			{/if}
 
-			{#key `${currentPath}-${statsVersion}`}
-				<CurrentPage />
+			{#key `${currentPath}-${selectedRange}-${statsVersion}`}
+				<CurrentPage activeRange={selectedRange} onRangeChange={changeRange} />
 			{/key}
 		</main>
 	{/if}
@@ -552,6 +605,12 @@
 		border-radius: 8px;
 		background: rgba(255, 120, 120, 0.08);
 		color: #ffd2d2;
+	}
+
+	.stats-loading {
+		margin: 0 0 18px;
+		color: var(--color-muted);
+		font-weight: 800;
 	}
 
 	:global(.spin) {

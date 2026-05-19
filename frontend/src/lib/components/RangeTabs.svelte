@@ -1,16 +1,26 @@
 <script lang="ts">
+	import { rangeOptions, type StatsRangeValue } from '$lib/data/music';
+
 	let {
-		active = '4 Weeks',
-		options = ['4 Weeks', '6 Months', 'All Time']
+		active = 'short_term',
+		options = rangeOptions,
+		onSelect = () => {}
 	}: {
-		active?: string;
-		options?: string[];
+		active?: StatsRangeValue;
+		options?: { label: string; value: StatsRangeValue }[];
+		onSelect?: (range: StatsRangeValue) => void | Promise<void>;
 	} = $props();
 </script>
 
 <div class="range-tabs" aria-label="Time range">
-	{#each options as option (option)}
-		<button type="button" class:active={option === active}>{option}</button>
+	{#each options as option (option.value)}
+		<button
+			type="button"
+			class:active={option.value === active}
+			onclick={() => onSelect(option.value)}
+		>
+			{option.label}
+		</button>
 	{/each}
 </div>
 
