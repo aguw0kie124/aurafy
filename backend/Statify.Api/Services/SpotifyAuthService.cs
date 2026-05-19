@@ -20,10 +20,7 @@ public sealed class SpotifyAuthService(
         "user-read-recently-played",
         "user-top-read"
     ];
-
     private readonly SpotifyOptions _spotifyOptions = spotifyOptions.Value;
-
-    public IReadOnlyList<string> Scopes => RequiredScopes;
 
     public string CreateState()
     {
@@ -94,33 +91,6 @@ public sealed class SpotifyAuthService(
         }
 
         return DeserializeTokenResponse(body);
-    }
-
-    public async Task<SpotifyUserProfileResponse> GetCurrentUserAsync(
-        string accessToken,
-        CancellationToken cancellationToken)
-    {
-        using var request = new HttpRequestMessage(HttpMethod.Get, "https://api.spotify.com/v1/me");
-        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", accessToken);
-
-        using var response = await httpClient.SendAsync(request, cancellationToken);
-        var body = await response.Content.ReadAsStringAsync(cancellationToken);
-
-        if (!response.IsSuccessStatusCode)
-        {
-            throw new SpotifyAuthException(
-                $"Spotify profile request failed with status {(int)response.StatusCode}.",
-                body);
-        }
-
-        var profile = JsonSerializer.Deserialize<SpotifyUserProfileResponse>(body);
-
-        if (profile is null || string.IsNullOrWhiteSpace(profile.Id))
-        {
-            throw new SpotifyAuthException("Spotify returned an invalid profile response.", body);
-        }
-
-        return profile;
     }
 
     private AuthenticationHeaderValue CreateBasicAuthHeader()

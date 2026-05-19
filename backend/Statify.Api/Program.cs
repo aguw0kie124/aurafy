@@ -46,7 +46,6 @@ builder.Services.AddScoped<SpotifyListeningSyncService>();
 builder.Services.AddScoped<SpotifyTopItemsService>();
 builder.Services.AddHttpClient<SpotifyAuthService>();
 builder.Services.AddHttpClient<SpotifyWebApiClient>();
-builder.Services.AddSingleton<FrontendRedirectService>();
 
 builder.Services.AddCors(options =>
 {
@@ -68,9 +67,6 @@ if (!app.Environment.IsDevelopment())
 app.UseCors("frontend");
 app.UseAuthentication();
 app.UseAuthorization();
-
-app.MapGet("/api/health", () =>
-    Results.Ok(new HealthResponse("ok", DateTimeOffset.UtcNow)));
 
 app.MapGet("/api/auth/me", (ClaimsPrincipal user) =>
 {
@@ -140,12 +136,13 @@ app.MapGet("/api/auth/spotify/login", (
 
 app.MapGet("/api/auth/spotify/callback", async (
     HttpContext httpContext,
-    FrontendRedirectService frontendRedirectService,
+    IConfiguration configuration,
     SpotifyAuthService spotifyAuthService,
     SpotifyWebApiClient spotifyWebApiClient,
     SpotifyAccountService spotifyAccountService,
     CancellationToken cancellationToken) =>
 {
+    var origin = (configuration["Frontend:Origin"] ?? "http://127.0.0.1:5173").TrimEnd('/');
     var request = httpContext.Request;
     var response = httpContext.Response;
     var returnedState = request.Query["state"].ToString();
@@ -158,21 +155,21 @@ app.MapGet("/api/auth/spotify/callback", async (
             Encoding.UTF8.GetBytes(returnedState),
             Encoding.UTF8.GetBytes(expectedState)))
     {
-        return Results.Redirect(frontendRedirectService.LoginError("state_mismatch"));
+        return Results.Redirect($"{origin}/?auth_error=state_mismatch");
     }
 
     var spotifyError = request.Query["error"].ToString();
 
     if (!string.IsNullOrWhiteSpace(spotifyError))
     {
-        return Results.Redirect(frontendRedirectService.LoginError(spotifyError));
+        return Results.Redirect($"{origin}/?auth_error={spotifyError}");
     }
 
     var code = request.Query["code"].ToString();
 
     if (string.IsNullOrWhiteSpace(code))
     {
-        return Results.Redirect(frontendRedirectService.LoginError("missing_code"));
+        return Results.Redirect($"{origin}/?auth_error=missing_code");
     }
 
     try
@@ -215,7 +212,7 @@ app.MapGet("/api/auth/spotify/callback", async (
                 ExpiresUtc = DateTimeOffset.UtcNow.AddDays(14)
             });
 
-        return Results.Redirect(frontendRedirectService.AppHome());
+        return Results.Redirect($"{origin}/");
     }
     catch (SpotifyAuthException exception)
     {
@@ -224,7 +221,7 @@ app.MapGet("/api/auth/spotify/callback", async (
             "Spotify token exchange failed. Response body: {ResponseBody}",
             exception.ResponseBody);
 
-        return Results.Redirect(frontendRedirectService.LoginError("spotify_auth_failed"));
+        return Results.Redirect($"{origin}/?auth_error=spotify_auth_failed");
     }
     catch (SpotifyApiException exception)
     {
@@ -233,88 +230,17 @@ app.MapGet("/api/auth/spotify/callback", async (
             "Spotify profile request failed. Response body: {ResponseBody}",
             exception.ResponseBody);
 
-        return Results.Redirect(frontendRedirectService.LoginError("spotify_profile_failed"));
+        return Results.Redirect($"{origin}/?auth_error=spotify_profile_failed");
     }
     catch (Exception exception) when (exception is NpgsqlException or InvalidOperationException)
     {
         app.Logger.LogError(exception, "Spotify sign-in persistence failed.");
 
-        return Results.Redirect(frontendRedirectService.LoginError("server_error"));
+        return Results.Redirect($"{origin}/?auth_error=server_error");
     }
 });
 
 var statsGroup = app.MapGroup("/api/stats").RequireAuthorization();
-
-statsGroup.MapGet("/dashboard", async (
-    ClaimsPrincipal user,
-    StatsRepository statsRepository,
-    string? range,
-    CancellationToken cancellationToken) =>
-{
-    if (!TryGetAppUserId(user, out var userId))
-    {
-        return Results.Unauthorized();
-    }
-
-    var startDate = StatsRange.GetStartDate(range, DateTimeOffset.UtcNow);
-    var summary = await statsRepository.GetDashboardSummaryAsync(userId, startDate, cancellationToken);
-
-    return Results.Ok(summary);
-});
-
-statsGroup.MapGet("/tracks", async (
-    ClaimsPrincipal user,
-    StatsRepository statsRepository,
-    string? range,
-    int? limit,
-    CancellationToken cancellationToken) =>
-{
-    if (!TryGetAppUserId(user, out var userId))
-    {
-        return Results.Unauthorized();
-    }
-
-    var startDate = StatsRange.GetStartDate(range, DateTimeOffset.UtcNow);
-    var tracks = await statsRepository.GetTopTracksAsync(userId, startDate, limit ?? 25, cancellationToken);
-
-    return Results.Ok(tracks);
-});
-
-statsGroup.MapGet("/artists", async (
-    ClaimsPrincipal user,
-    StatsRepository statsRepository,
-    string? range,
-    int? limit,
-    CancellationToken cancellationToken) =>
-{
-    if (!TryGetAppUserId(user, out var userId))
-    {
-        return Results.Unauthorized();
-    }
-
-    var startDate = StatsRange.GetStartDate(range, DateTimeOffset.UtcNow);
-    var artists = await statsRepository.GetTopArtistsAsync(userId, startDate, limit ?? 25, cancellationToken);
-
-    return Results.Ok(artists);
-});
-
-statsGroup.MapGet("/albums", async (
-    ClaimsPrincipal user,
-    StatsRepository statsRepository,
-    string? range,
-    int? limit,
-    CancellationToken cancellationToken) =>
-{
-    if (!TryGetAppUserId(user, out var userId))
-    {
-        return Results.Unauthorized();
-    }
-
-    var startDate = StatsRange.GetStartDate(range, DateTimeOffset.UtcNow);
-    var albums = await statsRepository.GetTopAlbumsAsync(userId, startDate, limit ?? 25, cancellationToken);
-
-    return Results.Ok(albums);
-});
 
 statsGroup.MapGet("/recap", async (
     ClaimsPrincipal user,
@@ -358,23 +284,6 @@ syncGroup.MapPost("/spotify/recently-played", async (
 });
 
 var spotifyGroup = app.MapGroup("/api/spotify").RequireAuthorization();
-
-spotifyGroup.MapGet("/me", async (
-    ClaimsPrincipal user,
-    SpotifyAccountService spotifyAccountService,
-    SpotifyWebApiClient spotifyWebApiClient,
-    CancellationToken cancellationToken) =>
-{
-    if (!TryGetAppUserId(user, out var userId))
-    {
-        return Results.Unauthorized();
-    }
-
-    var accessToken = await spotifyAccountService.GetValidAccessTokenAsync(userId, cancellationToken);
-    var profile = await spotifyWebApiClient.GetCurrentUserProfileAsync(accessToken, cancellationToken);
-
-    return Results.Ok(profile);
-});
 
 spotifyGroup.MapGet("/top", async (
     ClaimsPrincipal user,

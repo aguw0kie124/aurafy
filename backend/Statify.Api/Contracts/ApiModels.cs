@@ -1,7 +1,5 @@
 namespace Statify.Api.Contracts;
 
-public sealed record HealthResponse(string Status, DateTimeOffset CheckedAtUtc);
-
 public sealed record AuthStatusResponse(
     bool Authenticated,
     AuthUserResponse? User);
