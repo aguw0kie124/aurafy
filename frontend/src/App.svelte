@@ -1,8 +1,9 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
-	import { LogIn, LogOut } from '@lucide/svelte';
+	import { LogIn, LogOut, RefreshCw } from '@lucide/svelte';
 	import MediaThumb from '$lib/components/MediaThumb.svelte';
 	import { API_BASE_URL } from '$lib/config';
+	import { loadMusicData, syncListeningHistory } from '$lib/data/music';
 	import favicon from '$lib/assets/favicon.svg';
 	import Dashboard from './pages/Dashboard.svelte';
 	import Artists from './pages/Artists.svelte';
@@ -49,6 +50,9 @@
 	let authStatus = $state<'loading' | 'anonymous' | 'authenticated'>('loading');
 	let user = $state<AuthUser | null>(null);
 	let authCheckFailed = $state(false);
+	let statsStatus = $state<'idle' | 'loading' | 'ready' | 'error'>('idle');
+	let statsVersion = $state(0);
+	let syncing = $state(false);
 
 	const isAuthenticated = $derived(authStatus === 'authenticated' && user !== null);
 
@@ -83,6 +87,7 @@
 			if (data.authenticated && data.user) {
 				user = data.user;
 				authStatus = 'authenticated';
+				void loadStats();
 				return;
 			}
 
@@ -95,8 +100,36 @@
 		}
 	}
 
+	async function loadStats() {
+		statsStatus = 'loading';
+
+		try {
+			await loadMusicData();
+			statsStatus = 'ready';
+			statsVersion += 1;
+		} catch {
+			statsStatus = 'error';
+		}
+	}
+
 	function startSpotifyLogin() {
 		window.location.assign(`${API_BASE_URL}/api/auth/spotify/login`);
+	}
+
+	async function refreshStats() {
+		syncing = true;
+		statsStatus = 'loading';
+
+		try {
+			await syncListeningHistory();
+			await loadMusicData();
+			statsStatus = 'ready';
+			statsVersion += 1;
+		} catch {
+			statsStatus = 'error';
+		} finally {
+			syncing = false;
+		}
 	}
 
 	async function logout() {
@@ -107,6 +140,7 @@
 
 		user = null;
 		authStatus = 'anonymous';
+		statsStatus = 'idle';
 		navigate('/');
 	}
 
@@ -177,6 +211,15 @@
 				</nav>
 
 				<div class="tools">
+					<button
+						type="button"
+						aria-label={syncing ? 'Refreshing stats' : 'Refresh stats'}
+						title="Refresh stats"
+						disabled={syncing}
+						onclick={refreshStats}
+					>
+						<RefreshCw class={syncing ? 'spin' : undefined} size={20} strokeWidth={2} />
+					</button>
 					<button type="button" aria-label="Log out" onclick={logout}>
 						<LogOut size={20} strokeWidth={2} />
 					</button>
@@ -195,7 +238,13 @@
 		</header>
 
 		<main class="page-shell app-main">
-			<CurrentPage />
+			{#if statsStatus === 'error'}
+				<p class="stats-error">Stats could not load. Try refreshing.</p>
+			{/if}
+
+			{#key `${currentPath}-${statsVersion}`}
+				<CurrentPage />
+			{/key}
 		</main>
 	{/if}
 </div>
@@ -334,11 +383,35 @@
 		cursor: pointer;
 	}
 
+	.tools button:disabled {
+		cursor: progress;
+		opacity: 0.62;
+	}
+
 	.profile {
 		display: grid;
 		width: auto;
 		height: auto;
 		padding-left: 4px;
+	}
+
+	.stats-error {
+		margin: 0 0 18px;
+		padding: 12px 14px;
+		border: 1px solid rgba(255, 120, 120, 0.32);
+		border-radius: 8px;
+		background: rgba(255, 120, 120, 0.08);
+		color: #ffd2d2;
+	}
+
+	:global(.spin) {
+		animation: spin 0.9s linear infinite;
+	}
+
+	@keyframes spin {
+		to {
+			transform: rotate(360deg);
+		}
 	}
 
 	.app-main {
