@@ -8,13 +8,16 @@
 
 	let {
 		activeRange = 'short_term',
-		onRangeChange = () => {}
+		onRangeChange = () => {},
+		loading = false
 	}: {
 		activeRange?: StatsRangeValue;
 		onRangeChange?: (range: StatsRangeValue) => void;
+		loading?: boolean;
 	} = $props();
 
 	let selectedId = $state<string | null>(null);
+	const skeletonCards = Array.from({ length: 10 }, (_, index) => index);
 
 	const activeRangeLabel = $derived(
 		rangeOptions.find((option) => option.value === activeRange)?.label ?? '4 Weeks'
@@ -34,7 +37,19 @@
 	<RangeTabs active={activeRange} onSelect={onRangeChange} />
 </section>
 
-{#if artists.length > 0}
+{#if loading}
+	<section class="artist-grid" aria-hidden="true">
+		{#each skeletonCards as item (item)}
+			<article class="skeleton-card">
+				<span class="skeleton skeleton-artwork"></span>
+				<span class="skeleton-copy">
+					<span class="skeleton skeleton-line skeleton-title"></span>
+					<span class="skeleton skeleton-line skeleton-meta"></span>
+				</span>
+			</article>
+		{/each}
+	</section>
+{:else if artists.length > 0}
 	<section class="artist-grid">
 		{#each artists as artist, index (getArtistId(artist, index))}
 			{@const artistId = getArtistId(artist, index)}
@@ -124,6 +139,34 @@
 		color: inherit;
 		text-align: center;
 		cursor: pointer;
+	}
+
+	.skeleton-card {
+		gap: 14px;
+		justify-items: center;
+		padding: 18px;
+		pointer-events: none;
+	}
+
+	.skeleton-artwork {
+		width: min(160px, 100%);
+		aspect-ratio: 1;
+		border-radius: 999px;
+	}
+
+	.skeleton-copy {
+		display: grid;
+		justify-items: center;
+		gap: 8px;
+		width: 100%;
+	}
+
+	.skeleton-title {
+		width: 72%;
+	}
+
+	.skeleton-meta {
+		width: 38%;
 	}
 
 	.card-copy {

@@ -47,14 +47,19 @@
 
 	let {
 		activeRange = 'short_term',
-		onRangeChange = () => {}
+		onRangeChange = () => {},
+		loading = false
 	}: {
 		activeRange?: StatsRangeValue;
 		onRangeChange?: (range: StatsRangeValue) => void;
+		loading?: boolean;
 	} = $props();
 
 	let activeTab = $state<RecapTab>('tracks');
 	let selectedId = $state<string | null>(null);
+	const summarySkeletonCards = Array.from({ length: 4 }, (_, index) => index);
+	const recapSkeletonRows = Array.from({ length: 6 }, (_, index) => index);
+	const dnaSkeletonCards = Array.from({ length: 4 }, (_, index) => index);
 
 	const topTrack = $derived(tracks[0] ?? null);
 	const topArtist = $derived(artists[0] ?? null);
@@ -203,7 +208,104 @@
 </script>
 
 <section class="recap-shell">
-	{#if tracks.length > 0 || artists.length > 0}
+	{#if loading}
+		<section class="recap-hero loading-hero">
+			<div class="hero-artwork hero-artwork-loading" aria-hidden="true">
+				<span class="skeleton skeleton-hero-art"></span>
+			</div>
+
+			<div class="hero-copy">
+				<span class="skeleton skeleton-line skeleton-eyebrow" aria-hidden="true"></span>
+				<span class="skeleton skeleton-hero-title" aria-hidden="true"></span>
+				<div class="hero-range">
+					<span>{activeRangeLabel}</span>
+					<RangeTabs active={activeRange} onSelect={onRangeChange} />
+				</div>
+			</div>
+		</section>
+
+		<section class="metric-strip" aria-hidden="true">
+			{#each summarySkeletonCards as item (item)}
+				<article>
+					<span class="metric-icon skeleton skeleton-icon"></span>
+					<span class="skeleton skeleton-line skeleton-label"></span>
+					<span class="skeleton skeleton-line skeleton-value"></span>
+				</article>
+			{/each}
+		</section>
+
+		<section class="recap-studio" aria-hidden="true">
+			<div class="section-toolbar">
+				<span class="skeleton skeleton-line skeleton-heading"></span>
+
+				<div class="control-row">
+					<span class="skeleton skeleton-toggle"></span>
+					<span class="skeleton skeleton-pill"></span>
+				</div>
+			</div>
+
+			<div class="recap-layout">
+				<div class="ranked-panel" aria-label="Loading ranked listening list">
+					{#each recapSkeletonRows as item (item)}
+						<div class="rank-row skeleton-rank-row">
+							<div class="rank-main skeleton-rank-main">
+								<span class="skeleton skeleton-line skeleton-rank-number"></span>
+								<span class="skeleton skeleton-thumb"></span>
+								<span class="rank-copy skeleton-rank-copy">
+									<span class="skeleton skeleton-line skeleton-copy-title"></span>
+									<span class="skeleton skeleton-line skeleton-copy-meta"></span>
+								</span>
+								<span class="rank-meter">
+									<span class="skeleton skeleton-line skeleton-meter"></span>
+								</span>
+							</div>
+
+							<span class="icon-button">
+								<span class="skeleton skeleton-icon-button"></span>
+							</span>
+						</div>
+					{/each}
+				</div>
+
+				<aside class="detail-panel" aria-label="Loading selected recap item">
+					<span class="skeleton skeleton-detail-artwork"></span>
+					<div class="detail-copy skeleton-detail-copy">
+						<span class="skeleton skeleton-line skeleton-detail-title"></span>
+						<span class="skeleton skeleton-line skeleton-detail-meta"></span>
+					</div>
+
+					<dl>
+						<div>
+							<dt class="skeleton skeleton-line skeleton-dt"></dt>
+							<dd class="skeleton skeleton-line skeleton-dd"></dd>
+						</div>
+						<div>
+							<dt class="skeleton skeleton-line skeleton-dt"></dt>
+							<dd class="skeleton skeleton-line skeleton-dd"></dd>
+						</div>
+					</dl>
+
+					<span class="skeleton skeleton-link"></span>
+				</aside>
+			</div>
+		</section>
+
+		<section class="dna-section" aria-hidden="true">
+			<div class="section-toolbar">
+				<span class="skeleton skeleton-line skeleton-heading skeleton-heading-small"></span>
+			</div>
+
+			<div class="dna-row">
+				{#each dnaSkeletonCards as item (item)}
+					<article>
+						<span class="dna-icon skeleton skeleton-icon"></span>
+						<span class="skeleton skeleton-line skeleton-label"></span>
+						<span class="skeleton skeleton-line skeleton-value"></span>
+					</article>
+				{/each}
+			</div>
+		</section>
+	{:else if tracks.length > 0 || artists.length > 0}
 		<section class="recap-hero">
 			<div class="hero-artwork">
 				{#if heroArtwork}
@@ -438,6 +540,20 @@
 		content: '';
 	}
 
+	.loading-hero {
+		background: linear-gradient(180deg, rgba(44, 44, 44, 0.72), #121212 82%);
+	}
+
+	.hero-artwork-loading::after {
+		display: none;
+	}
+
+	.skeleton-hero-art {
+		width: 100%;
+		height: 100%;
+		border-radius: 8px;
+	}
+
 	.hero-placeholder {
 		display: grid;
 		place-items: center;
@@ -503,6 +619,16 @@
 		font-weight: 800;
 	}
 
+	.skeleton-eyebrow {
+		width: 96px;
+	}
+
+	.skeleton-hero-title {
+		width: min(680px, 100%);
+		height: clamp(58px, 8vw, 98px);
+		border-radius: 8px;
+	}
+
 	.metric-strip,
 	.dna-row {
 		display: grid;
@@ -538,6 +664,20 @@
 		border-radius: 999px;
 		background: #242424;
 		color: #1ed760;
+	}
+
+	.skeleton-icon {
+		border-radius: 999px;
+	}
+
+	.skeleton-label {
+		width: 74%;
+		height: 10px;
+	}
+
+	.skeleton-value {
+		width: 62%;
+		height: 24px;
 	}
 
 	.metric-strip article > span:not(.metric-icon),
@@ -579,6 +719,15 @@
 		line-height: 1;
 	}
 
+	.skeleton-heading {
+		width: 180px;
+		height: 28px;
+	}
+
+	.skeleton-heading-small {
+		width: 78px;
+	}
+
 	.control-row {
 		display: grid;
 		width: 100%;
@@ -606,6 +755,21 @@
 		padding-inline: 14px;
 		color: #b3b3b3;
 		font-weight: 800;
+	}
+
+	.skeleton-toggle,
+	.skeleton-pill {
+		height: 38px;
+		border-radius: 999px;
+	}
+
+	.skeleton-toggle {
+		width: min(280px, 100%);
+	}
+
+	.skeleton-pill {
+		justify-self: end;
+		width: 76px;
 	}
 
 	.category-toggle button {
@@ -674,6 +838,10 @@
 		box-shadow: inset 3px 0 0 #1ed760;
 	}
 
+	.skeleton-rank-row {
+		pointer-events: none;
+	}
+
 	.rank-main {
 		display: grid;
 		grid-template-columns: 42px 48px minmax(150px, 1fr) minmax(110px, 160px);
@@ -689,10 +857,37 @@
 		cursor: pointer;
 	}
 
+	.skeleton-rank-main {
+		cursor: default;
+	}
+
 	.rank-number {
 		color: #a7a7a7;
 		font-weight: 800;
 		text-align: center;
+	}
+
+	.skeleton-rank-number {
+		width: 18px;
+		justify-self: center;
+	}
+
+	.skeleton-thumb {
+		width: 48px;
+		height: 48px;
+		border-radius: 8px;
+	}
+
+	.skeleton-rank-copy {
+		width: 100%;
+	}
+
+	.skeleton-copy-title {
+		width: min(260px, 82%);
+	}
+
+	.skeleton-copy-meta {
+		width: min(180px, 58%);
 	}
 
 	.rank-copy {
@@ -724,6 +919,10 @@
 		justify-items: end;
 	}
 
+	.skeleton-meter {
+		width: 70px;
+	}
+
 	.icon-button {
 		display: grid;
 		width: 48px;
@@ -744,6 +943,12 @@
 		opacity: 0.25;
 	}
 
+	.skeleton-icon-button {
+		width: 22px;
+		height: 22px;
+		border-radius: 999px;
+	}
+
 	.detail-panel {
 		position: sticky;
 		top: 96px;
@@ -753,6 +958,25 @@
 		padding: 20px;
 		border-radius: 8px;
 		background: #181818;
+	}
+
+	.skeleton-detail-artwork {
+		width: 160px;
+		height: 160px;
+		border-radius: 16px;
+	}
+
+	.skeleton-detail-copy {
+		width: 100%;
+	}
+
+	.skeleton-detail-title {
+		width: min(260px, 84%);
+		height: 22px;
+	}
+
+	.skeleton-detail-meta {
+		width: 44%;
 	}
 
 	.detail-copy {
@@ -792,6 +1016,16 @@
 		background: #121212;
 	}
 
+	.skeleton-dt {
+		width: 54px;
+		height: 9px;
+	}
+
+	.skeleton-dd {
+		width: 68px;
+		height: 18px;
+	}
+
 	dt {
 		color: #a7a7a7;
 		font-size: 0.74rem;
@@ -803,6 +1037,12 @@
 		margin: 0;
 		font-size: 1.2rem;
 		font-weight: 800;
+	}
+
+	.skeleton-link {
+		width: 150px;
+		height: 42px;
+		border-radius: 999px;
 	}
 
 	.spotify-link {
@@ -889,6 +1129,11 @@
 		.rank-meter {
 			grid-column: 3;
 			width: 100%;
+			justify-items: start;
+		}
+
+		.skeleton-meter {
+			width: 84px;
 		}
 	}
 
@@ -905,6 +1150,11 @@
 		.control-row {
 			align-items: stretch;
 			grid-template-columns: 1fr;
+		}
+
+		.skeleton-toggle,
+		.skeleton-pill {
+			width: 100%;
 		}
 
 		dl {

@@ -8,13 +8,16 @@
 
 	let {
 		activeRange = 'short_term',
-		onRangeChange = () => {}
+		onRangeChange = () => {},
+		loading = false
 	}: {
 		activeRange?: StatsRangeValue;
 		onRangeChange?: (range: StatsRangeValue) => void;
+		loading?: boolean;
 	} = $props();
 
 	let selectedId = $state<string | null>(null);
+	const skeletonCards = Array.from({ length: 8 }, (_, index) => index);
 
 	const activeRangeLabel = $derived(
 		rangeOptions.find((option) => option.value === activeRange)?.label ?? '4 Weeks'
@@ -42,7 +45,20 @@
 	<RangeTabs active={activeRange} onSelect={onRangeChange} />
 </section>
 
-{#if albums.length > 0}
+{#if loading}
+	<section class="album-grid" aria-hidden="true">
+		{#each skeletonCards as item (item)}
+			<article class="skeleton-card">
+				<span class="skeleton skeleton-artwork"></span>
+				<span class="skeleton-copy">
+					<span class="skeleton skeleton-line skeleton-title"></span>
+					<span class="skeleton skeleton-line skeleton-meta"></span>
+					<span class="skeleton skeleton-line skeleton-rank"></span>
+				</span>
+			</article>
+		{/each}
+	</section>
+{:else if albums.length > 0}
 	<section class="album-grid">
 		{#each albums as album, index (getAlbumId(album, index))}
 			{@const albumId = getAlbumId(album, index)}
@@ -130,6 +146,39 @@
 		color: inherit;
 		text-align: left;
 		cursor: pointer;
+	}
+
+	.skeleton-card {
+		display: flex;
+		align-items: center;
+		gap: 16px;
+		padding: 16px;
+		pointer-events: none;
+	}
+
+	.skeleton-artwork {
+		flex: 0 0 clamp(96px, 32%, 160px);
+		aspect-ratio: 1;
+		border-radius: 16px;
+	}
+
+	.skeleton-copy {
+		display: grid;
+		flex: 1 1 auto;
+		gap: 8px;
+		min-width: 0;
+	}
+
+	.skeleton-title {
+		width: 82%;
+	}
+
+	.skeleton-meta {
+		width: 58%;
+	}
+
+	.skeleton-rank {
+		width: 48%;
 	}
 
 	.card-copy {

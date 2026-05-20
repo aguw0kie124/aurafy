@@ -60,6 +60,7 @@
 	let statsRequestId = 0;
 
 	const isAuthenticated = $derived(authStatus === 'authenticated' && user !== null);
+	const statsLoading = $derived(statsStatus === 'loading');
 	const selectedRangeLabel = $derived(
 		rangeOptions.find((option) => option.value === selectedRange)?.label ?? '4 Weeks'
 	);
@@ -337,15 +338,19 @@
 			</div>
 		</header>
 
-		<main class="page-shell app-main">
+		<main class="page-shell app-main" aria-busy={statsLoading}>
 			{#if statsStatus === 'error'}
 				<p class="stats-error">Stats could not load. Try refreshing.</p>
-			{:else if statsStatus === 'loading'}
-				<p class="stats-loading">Loading {selectedRangeLabel}...</p>
+			{:else if statsLoading}
+				<p class="sr-only" aria-live="polite">Loading {selectedRangeLabel} stats.</p>
 			{/if}
 
 			{#key `${currentPath}-${selectedRange}-${statsVersion}`}
-				<CurrentPage activeRange={selectedRange} onRangeChange={changeRange} />
+				<CurrentPage
+					activeRange={selectedRange}
+					onRangeChange={changeRange}
+					loading={statsLoading}
+				/>
 			{/key}
 		</main>
 	{/if}
@@ -605,12 +610,6 @@
 		border-radius: 8px;
 		background: rgba(255, 120, 120, 0.08);
 		color: #ffd2d2;
-	}
-
-	.stats-loading {
-		margin: 0 0 18px;
-		color: var(--color-muted);
-		font-weight: 800;
 	}
 
 	:global(.spin) {

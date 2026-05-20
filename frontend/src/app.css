@@ -10,6 +10,8 @@
 	--color-soft: #d6d6d6;
 	--color-accent: #1ed760;
 	--color-accent-hover: #3be477;
+	--color-skeleton-base: #232323;
+	--color-skeleton-shine: rgba(255, 255, 255, 0.08);
 	font-family:
 		'Plus Jakarta Sans',
 		ui-sans-serif,
@@ -72,6 +74,45 @@ a:focus-visible {
 	text-transform: uppercase;
 }
 
+.sr-only {
+	position: absolute;
+	width: 1px;
+	height: 1px;
+	padding: 0;
+	overflow: hidden;
+	border: 0;
+	clip: rect(0, 0, 0, 0);
+	white-space: nowrap;
+}
+
+.skeleton {
+	position: relative;
+	display: block;
+	overflow: hidden;
+	background: var(--color-skeleton-base);
+	color: transparent;
+}
+
+.skeleton::after {
+	position: absolute;
+	inset: 0;
+	background: linear-gradient(90deg, transparent, var(--color-skeleton-shine), transparent);
+	content: '';
+	transform: translateX(-100%);
+	animation: skeleton-shimmer 1.35s ease-in-out infinite;
+}
+
+.skeleton-line {
+	height: 12px;
+	border-radius: 999px;
+}
+
+@keyframes skeleton-shimmer {
+	to {
+		transform: translateX(100%);
+	}
+}
+
 ::selection {
 	background: rgba(30, 215, 96, 0.32);
 	color: #fff;
@@ -95,5 +136,12 @@ a:focus-visible {
 @media (max-width: 760px) {
 	.page-shell {
 		width: min(100% - 32px, 1480px);
+	}
+}
+
+@media (prefers-reduced-motion: reduce) {
+	.skeleton::after {
+		animation: none;
+		transform: none;
 	}
 }
