@@ -5,8 +5,9 @@
 .env.*
 !.env.example
 docs/
-**/bin/
-**/obj/
+.venv/
+**/__pycache__/
+*.pyc
 **/node_modules/
 **/.svelte-kit/
 **/build/

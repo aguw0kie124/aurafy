@@ -5,8 +5,8 @@ Aurafy is a Spotify listening stats app for seeing your music habits throughout 
 ## Tech Stack
 
 - Frontend: Svelte + Vite
-- Backend: ASP.NET Core
-- Database: PostgreSQL (Supabase)
+- Backend: FastAPI
+- Auth: Spotify OAuth with an HTTP-only session cookie
 
 ## Run Locally
 
@@ -18,26 +18,25 @@ Aurafy is a Spotify listening stats app for seeing your music habits throughout 
 
 2. Setup Environment Variables
 
-   - Create .env and copy `.env.example`.
+   - Create `.env` from `.env.example`.
    - Add your Spotify Client ID and Client Secret.
-   - For Supabase, add your Postgres connection string (in key-value format) to `.env`:
-     ```text
-     ConnectionStrings__Postgres=Host=db.<project-ref>.supabase.co;Port=5432;Database=postgres;Username=postgres;Password=<database-password>;SSL Mode=Require;Trust Server Certificate=true
-     ```
-   - Run `db/dbschema.sql` in the Supabase SQL editor.
 
-3. Run the Frontend
+3. Run the Backend
+
+   ```bash
+   cd backend
+   python3 -m venv .venv
+   source .venv/bin/activate
+   pip install -r requirements.txt
+   uvicorn app.main:app --reload --host 127.0.0.1 --port 5057
+   ```
+
+4. Run the Frontend
 
    ```bash
    cd frontend
    npm install
    npm run dev
-   ```
-
-4. Run the Backend
-
-   ```bash
-   dotnet run --project backend/Statify.Api --launch-profile http
    ```
 
 5. Open the app

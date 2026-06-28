@@ -1,5 +1,0 @@
-<Solution>
-  <Folder Name="/backend/">
-    <Project Path="backend/Statify.Api/Statify.Api.csproj" />
-  </Folder>
-</Solution>
