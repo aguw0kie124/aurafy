@@ -143,10 +143,55 @@ async function fetchJson<T>(path: string, init: RequestInit = {}) {
 	});
 
 	if (!response.ok) {
-		throw new Error(`Request failed with status ${response.status}`);
+		const detail = await response
+			.clone()
+			.json()
+			.then((body) => (body && typeof body.detail === 'string' ? body.detail : null))
+			.catch(() => null);
+		throw new Error(detail ?? `Request failed with status ${response.status}`);
 	}
 
 	return (await response.json()) as T;
+}
+
+export type ProposedTrack = Track & { reason?: string };
+
+export type ProposedPlaylist = {
+	generationId: string;
+	name: string;
+	description: string;
+	tracks: ProposedTrack[];
+	trackUris: string[];
+};
+
+export type GeneratePlaylistInput = {
+	prompt: string;
+	length: number;
+	mix: number;
+	allowExplicit: boolean;
+	range: StatsRangeValue;
+};
+
+export async function generatePlaylist(input: GeneratePlaylistInput) {
+	return fetchJson<ProposedPlaylist>('/api/ai/playlist/generate', {
+		method: 'POST',
+		headers: { 'Content-Type': 'application/json' },
+		body: JSON.stringify(input)
+	});
+}
+
+export type CommitPlaylistResult = {
+	playlistId: string;
+	spotifyUrl: string | null;
+	trackCount: number;
+};
+
+export async function commitPlaylist(generationId: string, isPublic = false) {
+	return fetchJson<CommitPlaylistResult>('/api/ai/playlist/commit', {
+		method: 'POST',
+		headers: { 'Content-Type': 'application/json' },
+		body: JSON.stringify({ generationId, isPublic })
+	});
 }
 
 function replaceArray<T>(target: T[], next: T[]) {

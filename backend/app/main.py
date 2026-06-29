@@ -15,6 +15,9 @@ import httpx
 from fastapi import FastAPI, HTTPException, Query, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, RedirectResponse
+from pydantic import BaseModel
+
+from .playlist_agent import ai_is_configured, generate_playlist
 
 try:
     from dotenv import load_dotenv
@@ -50,7 +53,10 @@ STATE_COOKIE = "spotify_oauth_state"
 SPOTIFY_AUTH_URL = "https://accounts.spotify.com/authorize"
 SPOTIFY_TOKEN_URL = "https://accounts.spotify.com/api/token"
 SPOTIFY_API_BASE = "https://api.spotify.com/v1"
-SPOTIFY_SCOPES = "user-read-recently-played user-top-read"
+SPOTIFY_SCOPES = (
+    "user-read-recently-played user-top-read "
+    "playlist-modify-public playlist-modify-private"
+)
 TOKEN_REFRESH_BUFFER_SECONDS = 60
 
 app = FastAPI(title="Aurafy FastAPI", version="0.1.0")
@@ -172,6 +178,32 @@ async def spotify_get(
         return response.json()
 
     raise HTTPException(status_code=502, detail="Spotify request failed after retry")
+
+
+async def spotify_post(
+    client: httpx.AsyncClient,
+    path: str,
+    access_token: str,
+    json_body: dict[str, Any],
+) -> dict[str, Any]:
+    response = await client.post(
+        f"{SPOTIFY_API_BASE}{path}",
+        json=json_body,
+        headers={"Authorization": f"Bearer {access_token}"},
+    )
+
+    if response.status_code == 403:
+        raise HTTPException(
+            status_code=403,
+            detail="Spotify denied the request. Reconnect Spotify to grant playlist permissions.",
+        )
+    if response.status_code >= 400:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Spotify request failed with {response.status_code}",
+        )
+
+    return response.json() if response.content else {}
 
 
 def normalize_range(value: str | None) -> str:
@@ -528,3 +560,100 @@ async def sync_recently_played(
                 "errorMessage": str(exc),
             },
         )
+
+
+class GeneratePlaylistRequest(BaseModel):
+    prompt: str
+    length: int = 25
+    mix: int = 30
+    allowExplicit: bool = True
+    range: str | None = None
+
+
+class CommitPlaylistRequest(BaseModel):
+    generationId: str
+    isPublic: bool = False
+
+
+@app.post("/api/ai/playlist/generate")
+async def generate_ai_playlist(request: Request, body: GeneratePlaylistRequest) -> dict[str, Any]:
+    session = require_session(request)
+    if not ai_is_configured():
+        raise HTTPException(
+            status_code=503,
+            detail="AI playlist builder is not configured. Add ANTHROPIC_API_KEY to .env.",
+        )
+
+    prompt = (body.prompt or "").strip()
+    if not prompt:
+        raise HTTPException(status_code=400, detail="Describe the playlist you want.")
+
+    opts = {
+        "length": body.length,
+        "mix": body.mix,
+        "allow_explicit": body.allowExplicit,
+        "range": normalize_range(body.range),
+    }
+
+    try:
+        proposed = await generate_playlist(session, prompt, opts)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Playlist generation failed: {exc}")
+
+    generation_id = secrets.token_urlsafe(12)
+    pending = session.setdefault("pending_playlists", {})
+    pending[generation_id] = {**proposed, "isPublic": body.isPublic, "createdAt": utc_now_iso()}
+    # Keep only the most recent drafts so the in-memory session stays small.
+    for stale_key in list(pending)[:-8]:
+        pending.pop(stale_key, None)
+
+    return {"generationId": generation_id, **proposed}
+
+
+@app.post("/api/ai/playlist/commit")
+async def commit_ai_playlist(request: Request, body: CommitPlaylistRequest) -> dict[str, Any]:
+    session = require_session(request)
+    pending = session.get("pending_playlists") or {}
+    proposed = pending.get(body.generationId)
+    if proposed is None:
+        raise HTTPException(status_code=404, detail="That playlist draft has expired. Generate a new one.")
+
+    uris = proposed.get("trackUris") or []
+    if not uris:
+        raise HTTPException(status_code=400, detail="This draft has no tracks to save.")
+
+    user_id = session["user"]["spotifyUserId"]
+    access_token = await refresh_access_token(session)
+    is_public = bool(body.isPublic or proposed.get("isPublic"))
+
+    async with httpx.AsyncClient(timeout=20) as client:
+        playlist = await spotify_post(
+            client,
+            f"/users/{user_id}/playlists",
+            access_token,
+            {
+                "name": proposed["name"],
+                "description": proposed.get("description") or "",
+                "public": is_public,
+            },
+        )
+        playlist_id = playlist.get("id")
+        if not playlist_id:
+            raise HTTPException(status_code=502, detail="Spotify did not return a playlist id.")
+
+        for start in range(0, len(uris), 100):
+            await spotify_post(
+                client,
+                f"/playlists/{playlist_id}/tracks",
+                access_token,
+                {"uris": uris[start : start + 100]},
+            )
+
+    pending.pop(body.generationId, None)
+    return {
+        "playlistId": playlist_id,
+        "spotifyUrl": (playlist.get("external_urls") or {}).get("spotify"),
+        "trackCount": len(uris),
+    }

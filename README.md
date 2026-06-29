@@ -1,12 +1,13 @@
 ## Aurafy
 
-Aurafy is a Spotify listening stats app for seeing your music habits throughout the year instead of waiting for Wrapped.
+Aurafy is a Spotify listening stats app for seeing your music habits throughout the year instead of waiting for Wrapped. It also includes an AI playlist builder: describe what you want and an agent curates a playlist grounded in your real listening history, then saves it to your Spotify account.
 
 ## Tech Stack
 
 - Frontend: Svelte + Vite
 - Backend: FastAPI
 - Auth: Spotify OAuth with an HTTP-only session cookie
+- AI: Claude (Anthropic) tool-use agent
 
 ## Run Locally
 
@@ -20,6 +21,7 @@ Aurafy is a Spotify listening stats app for seeing your music habits throughout 
 
    - Create `.env` from `.env.example`.
    - Add your Spotify Client ID and Client Secret.
+   - Add an `ANTHROPIC_API_KEY` to enable the AI playlist builder.
 
 3. Run the Backend
 

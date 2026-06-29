@@ -14,6 +14,7 @@
 	import Songs from './pages/Songs.svelte';
 	import Albums from './pages/Albums.svelte';
 	import Recap from './pages/Recap.svelte';
+	import Create from './pages/Create.svelte';
 	import './app.css';
 
 	type AuthUser = {
@@ -31,7 +32,8 @@
 		{ label: 'Recap', href: '/' },
 		{ label: 'Artists', href: '/artists' },
 		{ label: 'Songs', href: '/songs' },
-		{ label: 'Albums', href: '/albums' }
+		{ label: 'Albums', href: '/albums' },
+		{ label: 'Create', href: '/create' }
 	] as const;
 
 	const pages = {
@@ -39,7 +41,8 @@
 		'/artists': Artists,
 		'/songs': Songs,
 		'/albums': Albums,
-		'/recap': Recap
+		'/recap': Recap,
+		'/create': Create
 	} as const;
 
 	let currentUrl = $state(new URL(window.location.href));
