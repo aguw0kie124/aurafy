@@ -1,21 +1,20 @@
-"""Agentic AI playlist builder.
+"""Agentic AI playlist builder (Google Gemini).
 
-Runs a Claude tool-use loop that grounds itself in the user's real listening
-history (top artists/tracks/genres), searches Spotify for real playable tracks,
-and converges on a curated tracklist. The loop only *proposes* a playlist; the
-irreversible Spotify write happens later in the commit endpoint.
+Runs a Gemini function-calling loop that grounds itself in the user's real
+listening history (top artists/tracks/genres), searches Spotify for real
+playable tracks, and converges on a curated tracklist. The loop only *proposes*
+a playlist; the irreversible Spotify write happens later in the commit endpoint.
 """
 
 from __future__ import annotations
 
 import asyncio
-import json
 import os
 from typing import Any
 
 import httpx
 
-MODEL = "claude-opus-4-8"
+MODEL = "gemini-2.0-flash"
 MAX_ITERATIONS = 8
 MAX_SEARCHES = 16
 MIN_LENGTH = 5
@@ -25,19 +24,20 @@ _client = None
 
 
 def ai_is_configured() -> bool:
-    return bool(os.getenv("ANTHROPIC_API_KEY"))
+    return bool(os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY"))
 
 
 def _get_client():
     global _client
     if _client is None:
-        from anthropic import Anthropic
+        from google import genai
 
-        _client = Anthropic()
+        _client = genai.Client(api_key=os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY"))
     return _client
 
 
-TOOLS = [
+# Gemini function declarations (OpenAPI-subset schemas — no strict / additionalProperties).
+FUNCTION_DECLARATIONS = [
     {
         "name": "get_taste_profile",
         "description": (
@@ -45,7 +45,7 @@ TOOLS = [
             "their top artists (with genres), top tracks, and aggregated genres. "
             "Call this first to ground the playlist in what they actually listen to."
         ),
-        "input_schema": {
+        "parameters": {
             "type": "object",
             "properties": {
                 "time_range": {
@@ -65,7 +65,7 @@ TOOLS = [
             "Every track you put in the final playlist MUST come from these search "
             "results — never invent a track id."
         ),
-        "input_schema": {
+        "parameters": {
             "type": "object",
             "properties": {
                 "query": {
@@ -86,8 +86,7 @@ TOOLS = [
             "Submit the finished playlist. Call this exactly once when you are done "
             "curating. Every track must come from a prior search_tracks result."
         ),
-        "strict": True,
-        "input_schema": {
+        "parameters": {
             "type": "object",
             "properties": {
                 "name": {"type": "string", "description": "A short, catchy playlist name."},
@@ -110,12 +109,10 @@ TOOLS = [
                             },
                         },
                         "required": ["spotify_track_id", "title", "artist", "reason"],
-                        "additionalProperties": False,
                     },
                 },
             },
             "required": ["name", "description", "tracks"],
-            "additionalProperties": False,
         },
     },
 ]
@@ -147,7 +144,7 @@ def _build_system_prompt(opts: dict[str, Any]) -> str:
 
 async def _run_get_taste_profile(
     client: httpx.AsyncClient, access_token: str, time_range: str
-) -> str:
+) -> dict[str, Any]:
     from .main import artist_names, normalize_range, spotify_get
 
     normalized = normalize_range(time_range)
@@ -165,18 +162,13 @@ async def _run_get_taste_profile(
             genre_counts[genre] = genre_counts.get(genre, 0) + 1
     top_genres = [g for g, _ in sorted(genre_counts.items(), key=lambda kv: -kv[1])[:12]]
 
-    return json.dumps(
-        {
-            "topArtists": [
-                {"name": a.get("name"), "genres": (a.get("genres") or [])[:4]}
-                for a in artist_items
-            ],
-            "topTracks": [
-                {"title": t.get("name"), "artist": artist_names(t)} for t in track_items
-            ],
-            "topGenres": top_genres,
-        }
-    )
+    return {
+        "topArtists": [
+            {"name": a.get("name"), "genres": (a.get("genres") or [])[:4]} for a in artist_items
+        ],
+        "topTracks": [{"title": t.get("name"), "artist": artist_names(t)} for t in track_items],
+        "topGenres": top_genres,
+    }
 
 
 async def _run_search_tracks(
@@ -185,7 +177,7 @@ async def _run_search_tracks(
     query: str,
     limit: int,
     seen: dict[str, dict[str, Any]],
-) -> str:
+) -> list[dict[str, Any]]:
     from .main import artist_names, spotify_get
 
     limit = max(1, min(int(limit or 8), 10))
@@ -210,13 +202,15 @@ async def _run_search_tracks(
         seen[track_id] = meta
         results.append(meta)
 
-    return json.dumps(results)
+    return results
 
 
 async def generate_playlist(
     session: dict[str, Any], prompt: str, opts: dict[str, Any]
 ) -> dict[str, Any]:
     """Run the agentic loop and return a proposed (uncommitted) playlist."""
+    from google.genai import types
+
     from .main import refresh_access_token, to_track_response
 
     length = max(MIN_LENGTH, min(int(opts.get("length", 25)), MAX_LENGTH))
@@ -233,61 +227,59 @@ async def generate_playlist(
     finalized: dict[str, Any] | None = None
     search_count = 0
 
-    messages: list[dict[str, Any]] = [{"role": "user", "content": prompt.strip()}]
-    system_prompt = _build_system_prompt(opts)
+    config = types.GenerateContentConfig(
+        system_instruction=_build_system_prompt(opts),
+        tools=[types.Tool(function_declarations=FUNCTION_DECLARATIONS)],
+        temperature=1.0,
+    )
+    contents: list[Any] = [types.Content(role="user", parts=[types.Part(text=prompt.strip())])]
 
     async with httpx.AsyncClient(timeout=20) as http:
         for _ in range(MAX_ITERATIONS):
             response = await asyncio.to_thread(
-                client.messages.create,
+                client.models.generate_content,
                 model=MODEL,
-                max_tokens=4096,
-                thinking={"type": "adaptive"},
-                system=system_prompt,
-                tools=TOOLS,
-                messages=messages,
+                contents=contents,
+                config=config,
             )
-            messages.append({"role": "assistant", "content": response.content})
 
-            if response.stop_reason != "tool_use":
+            candidate = (response.candidates or [None])[0]
+            if candidate is None or candidate.content is None:
+                break
+            contents.append(candidate.content)
+
+            calls = [p.function_call for p in (candidate.content.parts or []) if p.function_call]
+            if not calls:
                 break
 
-            tool_results = []
-            for block in response.content:
-                if block.type != "tool_use":
-                    continue
-
-                if block.name == "get_taste_profile":
-                    content = await _run_get_taste_profile(
-                        http, access_token, block.input.get("time_range", opts["range"])
+            response_parts = []
+            for call in calls:
+                args = dict(call.args or {})
+                if call.name == "get_taste_profile":
+                    result: Any = await _run_get_taste_profile(
+                        http, access_token, args.get("time_range", opts["range"])
                     )
-                elif block.name == "search_tracks":
+                elif call.name == "search_tracks":
                     if search_count >= MAX_SEARCHES:
-                        content = json.dumps({"error": "search limit reached, finalize now"})
+                        result = {"error": "search limit reached, finalize now"}
                     else:
                         search_count += 1
-                        content = await _run_search_tracks(
-                            http,
-                            access_token,
-                            block.input.get("query", ""),
-                            block.input.get("limit", 8),
-                            seen,
+                        result = await _run_search_tracks(
+                            http, access_token, args.get("query", ""), args.get("limit", 8), seen
                         )
-                elif block.name == "finalize_playlist":
-                    finalized = block.input
-                    content = "Playlist recorded."
+                elif call.name == "finalize_playlist":
+                    finalized = args
+                    result = {"status": "recorded"}
                 else:
-                    content = json.dumps({"error": f"unknown tool {block.name}"})
+                    result = {"error": f"unknown tool {call.name}"}
 
-                tool_results.append(
-                    {
-                        "type": "tool_result",
-                        "tool_use_id": block.id,
-                        "content": content,
-                    }
+                response_parts.append(
+                    types.Part.from_function_response(
+                        name=call.name, response={"result": result}
+                    )
                 )
 
-            messages.append({"role": "user", "content": tool_results})
+            contents.append(types.Content(role="user", parts=response_parts))
 
             if finalized is not None:
                 break

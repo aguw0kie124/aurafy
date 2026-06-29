@@ -581,7 +581,7 @@ async def generate_ai_playlist(request: Request, body: GeneratePlaylistRequest) 
     if not ai_is_configured():
         raise HTTPException(
             status_code=503,
-            detail="AI playlist builder is not configured. Add ANTHROPIC_API_KEY to .env.",
+            detail="AI playlist builder is not configured. Add GEMINI_API_KEY to .env.",
         )
 
     prompt = (body.prompt or "").strip()

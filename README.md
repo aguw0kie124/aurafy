@@ -7,7 +7,7 @@ Aurafy is a Spotify listening stats app for seeing your music habits throughout 
 - Frontend: Svelte + Vite
 - Backend: FastAPI
 - Auth: Spotify OAuth with an HTTP-only session cookie
-- AI: Claude (Anthropic) tool-use agent
+- AI: Google Gemini function-calling agent
 
 ## Run Locally
 
@@ -21,7 +21,7 @@ Aurafy is a Spotify listening stats app for seeing your music habits throughout 
 
    - Create `.env` from `.env.example`.
    - Add your Spotify Client ID and Client Secret.
-   - Add an `ANTHROPIC_API_KEY` to enable the AI playlist builder.
+   - Add a free `GEMINI_API_KEY` (from [Google AI Studio](https://aistudio.google.com/apikey)) to enable the AI playlist builder.
 
 3. Run the Backend
 
