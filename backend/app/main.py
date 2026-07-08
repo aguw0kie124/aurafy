@@ -6,6 +6,7 @@ import os
 import secrets
 import time
 from collections import defaultdict
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -17,7 +18,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, RedirectResponse
 from pydantic import BaseModel
 
-from .playlist_agent import ai_is_configured, generate_playlist
+from . import db, playlist_agent, playlist_engine
 
 try:
     from dotenv import load_dotenv
@@ -54,12 +55,32 @@ SPOTIFY_AUTH_URL = "https://accounts.spotify.com/authorize"
 SPOTIFY_TOKEN_URL = "https://accounts.spotify.com/api/token"
 SPOTIFY_API_BASE = "https://api.spotify.com/v1"
 SPOTIFY_SCOPES = (
-    "user-read-recently-played user-top-read "
+    "user-read-recently-played user-top-read user-library-read "
+    "playlist-read-private playlist-read-collaborative "
     "playlist-modify-public playlist-modify-private"
 )
 TOKEN_REFRESH_BUFFER_SECONDS = 60
 
-app = FastAPI(title="Aurafy FastAPI", version="0.1.0")
+# Bounds on how much of the library a single sync pulls, to keep it responsive.
+LIBRARY_SAVED_CAP = 1000
+LIBRARY_PLAYLIST_CAP = 50
+LIBRARY_PLAYLIST_TRACKS_CAP = 100
+LIBRARY_ARTIST_DETAILS_CAP = 1000
+# When the batch /artists endpoint is blocked, cap how many single-artist
+# fallback fetches we make (genre hydration) to keep the sync responsive.
+ARTIST_SINGLE_FALLBACK_CAP = 200
+TOP_TIME_RANGES = ("short_term", "medium_term", "long_term")
+COOKIE_SECURE = FRONTEND_ORIGIN.startswith("https")
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    await db.connect()
+    yield
+    await db.disconnect()
+
+
+app = FastAPI(title="Aurafy FastAPI", version="0.1.0", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[FRONTEND_ORIGIN],
@@ -68,23 +89,20 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Demo-simple server-side sessions. They reset when uvicorn restarts.
-sessions: dict[str, dict[str, Any]] = {}
-
 
 def spotify_is_configured() -> bool:
     return bool(SPOTIFY_CLIENT_ID and SPOTIFY_CLIENT_SECRET and SPOTIFY_REDIRECT_URI)
 
 
-def get_session(request: Request) -> dict[str, Any] | None:
+async def get_session(request: Request) -> dict[str, Any] | None:
     session_id = request.cookies.get(SESSION_COOKIE)
     if not session_id:
         return None
-    return sessions.get(session_id)
+    return await db.get_session_ctx(session_id)
 
 
-def require_session(request: Request) -> dict[str, Any]:
-    session = get_session(request)
+async def require_session(request: Request) -> dict[str, Any]:
+    session = await get_session(request)
     if session is None:
         raise HTTPException(status_code=401, detail="Not authenticated")
     return session
@@ -147,6 +165,9 @@ async def refresh_access_token(session: dict[str, Any]) -> str:
     tokens["access_token"] = payload["access_token"]
     tokens["refresh_token"] = payload.get("refresh_token") or refresh_token
     tokens["expires_at"] = time.time() + int(payload.get("expires_in", 3600))
+    await db.upsert_tokens(
+        session["user_id"], tokens["access_token"], tokens["refresh_token"], tokens["expires_at"]
+    )
     return tokens["access_token"]
 
 
@@ -354,10 +375,7 @@ async def fetch_recently_played(session: dict[str, Any]) -> list[dict[str, Any]]
     access_token = await refresh_access_token(session)
     async with httpx.AsyncClient(timeout=20) as client:
         payload = await spotify_get(client, "/me/player/recently-played", access_token, {"limit": 50})
-    items = payload.get("items") or []
-    session["recently_played"] = items
-    session["last_synced_at"] = utc_now_iso()
-    return items
+    return payload.get("items") or []
 
 
 @app.get("/health")
@@ -367,7 +385,7 @@ async def health() -> dict[str, Any]:
 
 @app.get("/api/auth/me")
 async def auth_me(request: Request) -> dict[str, Any]:
-    session = get_session(request)
+    session = await get_session(request)
     if session is None:
         return {"authenticated": False, "user": None}
     return {"authenticated": True, "user": session["user"]}
@@ -377,7 +395,7 @@ async def auth_me(request: Request) -> dict[str, Any]:
 async def logout(request: Request) -> Response:
     session_id = request.cookies.get(SESSION_COOKIE)
     if session_id:
-        sessions.pop(session_id, None)
+        await db.delete_session(session_id)
     response = Response(status_code=204)
     response.delete_cookie(SESSION_COOKIE)
     return response
@@ -429,24 +447,25 @@ async def spotify_callback(request: Request) -> RedirectResponse:
 
     spotify_user_id = profile.get("id") or "spotify-user"
     display_name = profile.get("display_name") or spotify_user_id
+    user_id = await db.upsert_user(spotify_user_id, display_name, select_image_url(profile.get("images")))
+    await db.upsert_tokens(
+        user_id,
+        access_token,
+        token_payload.get("refresh_token") or "",
+        time.time() + int(token_payload.get("expires_in", 3600)),
+    )
     session_id = secrets.token_urlsafe(32)
-    sessions[session_id] = {
-        "user": {
-            "spotifyUserId": spotify_user_id,
-            "displayName": display_name,
-            "imageUrl": select_image_url(profile.get("images")),
-        },
-        "tokens": {
-            "access_token": access_token,
-            "refresh_token": token_payload.get("refresh_token"),
-            "expires_at": time.time() + int(token_payload.get("expires_in", 3600)),
-        },
-        "recently_played": [],
-        "last_synced_at": None,
-    }
+    await db.create_session(session_id, user_id)
 
     response = redirect_to_frontend()
-    response.set_cookie(SESSION_COOKIE, session_id, httponly=True, samesite="lax", max_age=14 * 24 * 60 * 60)
+    response.set_cookie(
+        SESSION_COOKIE,
+        session_id,
+        httponly=True,
+        samesite="lax",
+        secure=COOKIE_SECURE,
+        max_age=14 * 24 * 60 * 60,
+    )
     return response
 
 
@@ -456,7 +475,7 @@ async def spotify_top(
     range: str | None = None,
     limit: int = Query(50, ge=1, le=50),
 ) -> dict[str, Any]:
-    session = require_session(request)
+    session = await require_session(request)
     normalized_range = normalize_range(range)
     access_token = await refresh_access_token(session)
 
@@ -478,8 +497,8 @@ async def spotify_top(
 
 @app.get("/api/stats/recap")
 async def stats_recap(request: Request, range: str | None = None) -> dict[str, Any]:
-    session = require_session(request)
-    playbacks = session.get("recently_played") or await fetch_recently_played(session)
+    session = await require_session(request)
+    playbacks = await fetch_recently_played(session)
     valid_playbacks = [item for item in playbacks if item.get("track")]
 
     artist_duration: defaultdict[str, int] = defaultdict(int)
@@ -521,7 +540,7 @@ async def stats_recap(request: Request, range: str | None = None) -> dict[str, A
             "totalPlays": len(valid_playbacks),
             "uniqueTracks": len(track_ids),
             "lastPlayedAt": last_played_at,
-            "lastSyncedAt": session.get("last_synced_at"),
+            "lastSyncedAt": utc_now_iso(),
         },
         "timeOfDay": build_time_of_day(valid_playbacks),
     }
@@ -532,7 +551,7 @@ async def sync_recently_played(
     request: Request,
     force: bool = False,
 ):
-    session = require_session(request)
+    session = await require_session(request)
     sync_id = int(time.time() * 1000)
     started_at = utc_now_iso()
 
@@ -562,82 +581,324 @@ async def sync_recently_played(
         )
 
 
-class GeneratePlaylistRequest(BaseModel):
-    prompt: str
+async def _paginate(
+    client: httpx.AsyncClient,
+    path: str,
+    access_token: str,
+    cap: int,
+    params: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    """Follow Spotify's offset paging up to ``cap`` items."""
+    items: list[dict[str, Any]] = []
+    offset = 0
+    while len(items) < cap:
+        page = await spotify_get(
+            client, path, access_token, {**(params or {}), "limit": 50, "offset": offset}
+        )
+        batch = page.get("items") or []
+        items.extend(batch)
+        offset += 50
+        if not batch or not page.get("next"):
+            break
+    return items[:cap]
+
+
+def _track_row(track: dict[str, Any]) -> dict[str, Any]:
+    album = track.get("album") or {}
+    return {
+        "spotify_track_id": track["id"],
+        "title": track.get("name") or "Unknown track",
+        "artist": artist_names(track),
+        "album": album.get("name"),
+        "image_url": select_image_url(album.get("images")),
+        "external_url": spotify_external_url(track),
+        "popularity": track.get("popularity"),
+        "explicit": bool(track.get("explicit")),
+        "duration_ms": track.get("duration_ms"),
+    }
+
+
+def _is_real_track(track: dict[str, Any] | None) -> bool:
+    return bool(track and track.get("id") and track.get("type", "track") == "track")
+
+
+async def _fetch_artist_details(
+    client: httpx.AsyncClient,
+    access_token: str,
+    artist_ids: set[str],
+    seeded: dict[str, dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    """Hydrate artists (name/image/popularity/genres). ``seeded`` holds artist
+    objects we already have (e.g. from /me/top/artists) so we skip re-fetching.
+
+    Prefers the batch "Get Several Artists" endpoint, but some Spotify apps are
+    blocked from it (403) under the 2024 API restrictions — in that case we fall
+    back to permitted single-artist fetches (capped, run concurrently)."""
+    details = dict(seeded)
+    missing = [aid for aid in artist_ids if aid not in details][:LIBRARY_ARTIST_DETAILS_CAP]
+
+    for start in range(0, len(missing), 50):
+        chunk = missing[start : start + 50]
+        try:
+            payload = await spotify_get(client, "/artists", access_token, {"ids": ",".join(chunk)})
+        except HTTPException:
+            break  # batch endpoint blocked for this app — switch to the fallback below
+        for artist in payload.get("artists") or []:
+            if artist and artist.get("id"):
+                details[artist["id"]] = artist
+
+    async def fetch_one(artist_id: str) -> dict[str, Any] | None:
+        try:
+            return await spotify_get(client, f"/artists/{artist_id}", access_token)
+        except HTTPException:
+            return None
+
+    still_missing = [aid for aid in missing if aid not in details][:ARTIST_SINGLE_FALLBACK_CAP]
+    for start in range(0, len(still_missing), 8):
+        chunk = still_missing[start : start + 8]
+        for artist in await asyncio.gather(*(fetch_one(aid) for aid in chunk)):
+            if artist and artist.get("id"):
+                details[artist["id"]] = artist
+    return details
+
+
+@app.post("/api/library/sync")
+async def sync_library(request: Request) -> dict[str, Any]:
+    """Pull the user's Spotify library (liked songs, playlists, top items,
+    recently-played, artist genres) and persist a full snapshot to Postgres."""
+    session = await require_session(request)
+    access_token = await refresh_access_token(session)
+
+    tracks_by_id: dict[str, dict[str, Any]] = {}
+    track_artists: list[tuple[str, str, int]] = []
+    seen_track_artist: set[tuple[str, str]] = set()
+    artist_ids: set[str] = set()
+
+    def register_track(track: dict[str, Any] | None) -> str | None:
+        """Record a track + its artist links, return its id (or None if not a real track)."""
+        if not _is_real_track(track):
+            return None
+        track_id = track["id"]
+        tracks_by_id[track_id] = _track_row(track)
+        for position, artist in enumerate(track.get("artists") or []):
+            aid = artist.get("id")
+            if not aid:
+                continue
+            artist_ids.add(aid)
+            if (track_id, aid) not in seen_track_artist:
+                seen_track_artist.add((track_id, aid))
+                track_artists.append((track_id, aid, position))
+        return track_id
+
+    saved_tracks: list[tuple[str, datetime | None]] = []
+    playlists: list[dict[str, Any]] = []
+    playlist_tracks: list[tuple[str, str, int]] = []
+    top_tracks: list[tuple[str, str, int]] = []
+    top_artists: list[tuple[str, str, int]] = []
+    play_history: list[tuple[str, datetime]] = []
+    seeded_artists: dict[str, dict[str, Any]] = {}
+
+    async with httpx.AsyncClient(timeout=30) as client:
+        # Liked songs.
+        for item in await _paginate(client, "/me/tracks", access_token, LIBRARY_SAVED_CAP):
+            track_id = register_track(item.get("track"))
+            if track_id:
+                saved_tracks.append((track_id, parse_spotify_time(item.get("added_at"))))
+
+        # Playlists + their tracks. Needs playlist-read-* scopes; if the user's
+        # token predates them Spotify returns 403 — skip playlists rather than
+        # failing the whole sync (liked/top/recent still get stored).
+        try:
+            user_playlists = await _paginate(
+                client, "/me/playlists", access_token, LIBRARY_PLAYLIST_CAP
+            )
+        except HTTPException:
+            user_playlists = []
+        for playlist in user_playlists:
+            playlist_id = playlist.get("id")
+            if not playlist_id:
+                continue
+            # March 2026 migration renamed the playlist object's "tracks" field
+            # to "items" and the entries' "track" key to "item".
+            summary = playlist.get("items") or playlist.get("tracks") or {}
+            playlists.append(
+                {
+                    "spotify_playlist_id": playlist_id,
+                    "name": playlist.get("name"),
+                    "track_total": summary.get("total") if isinstance(summary, dict) else None,
+                }
+            )
+            try:
+                items = await _paginate(
+                    client,
+                    f"/playlists/{playlist_id}/items",
+                    access_token,
+                    LIBRARY_PLAYLIST_TRACKS_CAP,
+                )
+            except HTTPException:
+                continue  # skip a playlist we can't read rather than failing the whole sync
+            for position, item in enumerate(items):
+                track_id = register_track(item.get("item") or item.get("track"))
+                if track_id:
+                    playlist_tracks.append((playlist_id, track_id, position))
+
+        # Top tracks & artists per time range.
+        for time_range in TOP_TIME_RANGES:
+            top_track_resp, top_artist_resp = await asyncio.gather(
+                spotify_get(client, "/me/top/tracks", access_token, {"time_range": time_range, "limit": 50}),
+                spotify_get(client, "/me/top/artists", access_token, {"time_range": time_range, "limit": 50}),
+            )
+            for rank, track in enumerate(top_track_resp.get("items") or [], start=1):
+                track_id = register_track(track)
+                if track_id:
+                    top_tracks.append((track_id, time_range, rank))
+            for rank, artist in enumerate(top_artist_resp.get("items") or [], start=1):
+                aid = artist.get("id")
+                if not aid:
+                    continue
+                artist_ids.add(aid)
+                seeded_artists[aid] = artist  # already includes genres
+                top_artists.append((aid, time_range, rank))
+
+        # Recently played.
+        recent = await spotify_get(
+            client, "/me/player/recently-played", access_token, {"limit": 50}
+        )
+        for item in recent.get("items") or []:
+            track_id = register_track(item.get("track"))
+            played_at = parse_spotify_time(item.get("played_at"))
+            if track_id and played_at is not None:
+                play_history.append((track_id, played_at))
+
+        # Hydrate artist genres/details.
+        details = await _fetch_artist_details(client, access_token, artist_ids, seeded_artists)
+
+    # Only keep links whose artist we actually hydrated (satisfies FK constraints).
+    artists_payload = [
+        {
+            "spotify_artist_id": artist["id"],
+            "name": artist.get("name") or "Unknown artist",
+            "image_url": select_image_url(artist.get("images")),
+            "external_url": spotify_external_url(artist),
+            "popularity": artist.get("popularity"),
+        }
+        for artist in details.values()
+    ]
+    artist_genres = {artist["id"]: (artist.get("genres") or []) for artist in details.values()}
+    track_artists = [row for row in track_artists if row[1] in details]
+    top_artists = [row for row in top_artists if row[0] in details]
+
+    payload = {
+        "artists": artists_payload,
+        "artist_genres": artist_genres,
+        "tracks": list(tracks_by_id.values()),
+        "track_artists": track_artists,
+        "saved_tracks": saved_tracks,
+        "playlists": playlists,
+        "playlist_tracks": playlist_tracks,
+        "top_tracks": top_tracks,
+        "top_artists": top_artists,
+        "play_history": play_history,
+    }
+    await db.sync_library(session["user_id"], payload)
+
+    return {
+        "syncedAt": utc_now_iso(),
+        "counts": {
+            "savedTracks": len(saved_tracks),
+            "playlists": len(playlists),
+            "playlistTracks": len(playlist_tracks),
+            "topTracks": len(top_tracks),
+            "topArtists": len(top_artists),
+            "recentlyPlayed": len(play_history),
+            "artists": len(artists_payload),
+            "tracks": len(tracks_by_id),
+        },
+    }
+
+
+class PlaylistPreviewRequest(BaseModel):
+    mode: str = "params"  # "params" | "instruction"
+    # params mode
+    name: str | None = None
+    description: str | None = None
     length: int = 25
     mix: int = 30
     allowExplicit: bool = True
-    range: str | None = None
+    genres: list[str] = []
+    seedArtistNames: list[str] = []
+    # instruction mode
+    instruction: str | None = None
 
 
-class CommitPlaylistRequest(BaseModel):
-    generationId: str
+class PlaylistCreateRequest(BaseModel):
+    name: str
+    description: str | None = None
+    trackUris: list[str]
     isPublic: bool = False
 
 
-@app.post("/api/ai/playlist/generate")
-async def generate_ai_playlist(request: Request, body: GeneratePlaylistRequest) -> dict[str, Any]:
-    session = require_session(request)
-    if not ai_is_configured():
-        raise HTTPException(
-            status_code=503,
-            detail="AI playlist builder is not configured. Add GEMINI_API_KEY to .env.",
+@app.post("/api/playlist/preview")
+async def preview_playlist(request: Request, body: PlaylistPreviewRequest) -> dict[str, Any]:
+    """Build a proposed (uncommitted) playlist from parameters or a short instruction."""
+    session = await require_session(request)
+
+    if body.mode == "instruction":
+        instruction = (body.instruction or "").strip()
+        if not instruction:
+            raise HTTPException(status_code=400, detail="Describe the playlist you want.")
+        if not playlist_agent.ai_is_configured():
+            raise HTTPException(
+                status_code=503,
+                detail="Natural-language mode isn't configured. Add GEMINI_API_KEY, or use the controls.",
+            )
+        user_id = session["user_id"]
+        genre_rows = await db.get_genre_weights(user_id)
+        artist_rows = await db.get_artist_weights(user_id)
+        spec = await playlist_agent.spec_from_instruction(
+            instruction,
+            [r["genre"] for r in genre_rows[:12]],
+            [r["name"] for r in artist_rows[:12]],
         )
+    else:
+        spec = {
+            "name": body.name,
+            "description": body.description,
+            "length": body.length,
+            "mix": body.mix,
+            "allow_explicit": body.allowExplicit,
+            "genres": body.genres,
+            "seed_artist_names": body.seedArtistNames,
+        }
 
-    prompt = (body.prompt or "").strip()
-    if not prompt:
-        raise HTTPException(status_code=400, detail="Describe the playlist you want.")
-
-    opts = {
-        "length": body.length,
-        "mix": body.mix,
-        "allow_explicit": body.allowExplicit,
-        "range": normalize_range(body.range),
-    }
-
-    try:
-        proposed = await generate_playlist(session, prompt, opts)
-    except HTTPException:
-        raise
-    except Exception as exc:
-        raise HTTPException(status_code=502, detail=f"Playlist generation failed: {exc}")
-
-    generation_id = secrets.token_urlsafe(12)
-    pending = session.setdefault("pending_playlists", {})
-    pending[generation_id] = {**proposed, "isPublic": body.isPublic, "createdAt": utc_now_iso()}
-    # Keep only the most recent drafts so the in-memory session stays small.
-    for stale_key in list(pending)[:-8]:
-        pending.pop(stale_key, None)
-
-    return {"generationId": generation_id, **proposed}
+    proposed = await playlist_engine.build(session, spec)
+    if not proposed["tracks"]:
+        raise HTTPException(
+            status_code=422,
+            detail="Couldn't assemble a playlist. Sync your library or loosen the filters and retry.",
+        )
+    return proposed
 
 
-@app.post("/api/ai/playlist/commit")
-async def commit_ai_playlist(request: Request, body: CommitPlaylistRequest) -> dict[str, Any]:
-    session = require_session(request)
-    pending = session.get("pending_playlists") or {}
-    proposed = pending.get(body.generationId)
-    if proposed is None:
-        raise HTTPException(status_code=404, detail="That playlist draft has expired. Generate a new one.")
-
-    uris = proposed.get("trackUris") or []
+@app.post("/api/playlist/create")
+async def create_playlist(request: Request, body: PlaylistCreateRequest) -> dict[str, Any]:
+    """Create the proposed playlist in the user's Spotify account."""
+    session = await require_session(request)
+    uris = body.trackUris or []
     if not uris:
-        raise HTTPException(status_code=400, detail="This draft has no tracks to save.")
+        raise HTTPException(status_code=400, detail="No tracks to save.")
 
-    user_id = session["user"]["spotifyUserId"]
     access_token = await refresh_access_token(session)
-    is_public = bool(body.isPublic or proposed.get("isPublic"))
 
+    # March 2026 Web API migration: playlists are created via /me/playlists and
+    # tracks are added via /playlists/{id}/items (the old /users/{id}/playlists
+    # and /playlists/{id}/tracks routes 403 for development-mode apps).
     async with httpx.AsyncClient(timeout=20) as client:
         playlist = await spotify_post(
             client,
-            f"/users/{user_id}/playlists",
+            "/me/playlists",
             access_token,
-            {
-                "name": proposed["name"],
-                "description": proposed.get("description") or "",
-                "public": is_public,
-            },
+            {"name": body.name, "description": body.description or "", "public": bool(body.isPublic)},
         )
         playlist_id = playlist.get("id")
         if not playlist_id:
@@ -646,12 +907,11 @@ async def commit_ai_playlist(request: Request, body: CommitPlaylistRequest) -> d
         for start in range(0, len(uris), 100):
             await spotify_post(
                 client,
-                f"/playlists/{playlist_id}/tracks",
+                f"/playlists/{playlist_id}/items",
                 access_token,
                 {"uris": uris[start : start + 100]},
             )
 
-    pending.pop(body.generationId, None)
     return {
         "playlistId": playlist_id,
         "spotifyUrl": (playlist.get("external_urls") or {}).get("spotify"),

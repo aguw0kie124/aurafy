@@ -1,13 +1,19 @@
 ## Aurafy
 
-Aurafy is a Spotify listening stats app for seeing your music habits throughout the year instead of waiting for Wrapped. It also includes an AI playlist builder: describe what you want and an agent curates a playlist grounded in your real listening history, then saves it to your Spotify account.
+Aurafy is a Spotify playlist builder that uses Gemini AI to generate personalized playlists based on your listening history and mood preferences.
+
+### Features
+
+- AI-powered playlist generation using Gemini API based on your listening history and preferences
+- Full-stack web app built with FastAPI backend and Svelte/TypeScript frontend
+- Spotify OAuth authentication and real-time data integration via Spotify Web API
 
 ## Tech Stack
 
 - Frontend: Svelte + Vite
 - Backend: FastAPI
 - Auth: Spotify OAuth with an HTTP-only session cookie
-- AI: Google Gemini function-calling agent
+- AI: Gemini API for playlist generation and personalized recommendations
 
 ## Run Locally
 
@@ -21,7 +27,6 @@ Aurafy is a Spotify listening stats app for seeing your music habits throughout 
 
    - Create `.env` from `.env.example`.
    - Add your Spotify Client ID and Client Secret.
-   - Add a free `GEMINI_API_KEY` (from [Google AI Studio](https://aistudio.google.com/apikey)) to enable the AI playlist builder.
 
 3. Run the Backend
 

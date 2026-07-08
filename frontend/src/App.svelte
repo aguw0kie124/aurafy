@@ -6,7 +6,7 @@
 	import {
 		loadMusicData,
 		rangeOptions,
-		syncListeningHistory,
+		syncLibrary,
 		type StatsRangeValue
 	} from '$lib/data/music';
 	import favicon from '$lib/assets/favicon.svg';
@@ -14,7 +14,7 @@
 	import Songs from './pages/Songs.svelte';
 	import Albums from './pages/Albums.svelte';
 	import Recap from './pages/Recap.svelte';
-	import Create from './pages/Create.svelte';
+	import Build from './pages/Build.svelte';
 	import './app.css';
 
 	type AuthUser = {
@@ -33,7 +33,7 @@
 		{ label: 'Artists', href: '/artists' },
 		{ label: 'Songs', href: '/songs' },
 		{ label: 'Albums', href: '/albums' },
-		{ label: 'Create', href: '/create' }
+		{ label: 'Build', href: '/build' }
 	] as const;
 
 	const pages = {
@@ -42,7 +42,7 @@
 		'/songs': Songs,
 		'/albums': Albums,
 		'/recap': Recap,
-		'/create': Create
+		'/build': Build
 	} as const;
 
 	let currentUrl = $state(new URL(window.location.href));
@@ -169,7 +169,7 @@
 		statsStatus = 'loading';
 
 		try {
-			await syncListeningHistory(true);
+			await syncLibrary();
 			await loadMusicData(selectedRange);
 			statsStatus = 'ready';
 			statsVersion += 1;
@@ -284,8 +284,8 @@
 				<div class="tools">
 					<button
 						type="button"
-						aria-label={syncing ? 'Syncing captured history' : 'Sync captured history'}
-						title="Sync captured history"
+						aria-label={syncing ? 'Syncing your library' : 'Sync your library'}
+						title="Sync your Spotify library"
 						disabled={syncing}
 						onclick={refreshStats}
 					>

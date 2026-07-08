@@ -1,26 +1,50 @@
-"""Agentic AI playlist builder (Google Gemini).
+"""Natural-language layer for the playlist builder (Google Gemini).
 
-Runs a Gemini function-calling loop that grounds itself in the user's real
-listening history (top artists/tracks/genres), searches Spotify for real
-playable tracks, and converges on a curated tracklist. The loop only *proposes*
-a playlist; the irreversible Spotify write happens later in the commit endpoint.
+Two jobs, both hallucination-safe by construction:
+
+1. ``spec_from_instruction`` — translate a short free-text request into a
+   structured ``PlaylistSpec`` the deterministic engine executes.
+2. ``discovery_ideas`` — act as a music curator: given the spec and the
+   listener's taste, propose artists/songs they likely DON'T know yet
+   (grounded with Google Search when available). Spotify apps lost the
+   /recommendations and related-artists endpoints, so this fills that hole.
+
+Gemini only ever emits names and search hints — never track ids. Everything it
+suggests is resolved through live Spotify search, so nothing fake can appear.
+
+Capability-flagged: if no Gemini key is configured, the parameter-based builder
+still works; only these AI modes are unavailable.
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 from typing import Any
 
-import httpx
+from fastapi import HTTPException
 
-MODEL = "gemini-2.0-flash"
-MAX_ITERATIONS = 8
-MAX_SEARCHES = 16
-MIN_LENGTH = 5
-MAX_LENGTH = 50
+MODEL = "gemini-2.5-flash"  # 2.0-flash no longer has free-tier quota
 
 _client = None
+
+SYSTEM_INSTRUCTION = """You translate a listener's short request into a JSON playlist spec.
+
+Return ONLY a JSON object with exactly these fields:
+- name: a short, catchy playlist title
+- description: one sentence describing the playlist
+- length: integer between 5 and 50 (default 25)
+- mix: integer 0..100. 0 = only songs the listener already knows; 100 = only new
+  discoveries. Use a high value when they ask for new / fresh / "stuff I haven't heard".
+- allow_explicit: boolean (default true; set false if they ask for clean / no explicit)
+- genres: array of genre strings to focus on. Prefer choosing from the USER'S TOP GENRES
+  listed below. There are NO audio features available, so translate any mood words
+  (chill, hype, workout, sad, focus, party) into fitting genres.
+- seed_artist_names: array of artist names ONLY if they explicitly want music like a
+  specific artist; otherwise an empty array.
+
+Never include track names or ids. Output only the JSON object, nothing else."""
 
 
 def ai_is_configured() -> bool:
@@ -36,301 +60,129 @@ def _get_client():
     return _client
 
 
-# Gemini function declarations (OpenAPI-subset schemas — no strict / additionalProperties).
-FUNCTION_DECLARATIONS = [
-    {
-        "name": "get_taste_profile",
-        "description": (
-            "Get the user's real Spotify listening profile for a time range: "
-            "their top artists (with genres), top tracks, and aggregated genres. "
-            "Call this first to ground the playlist in what they actually listen to."
-        ),
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "time_range": {
-                    "type": "string",
-                    "enum": ["short_term", "medium_term", "long_term"],
-                    "description": "short_term = last 4 weeks, medium_term = 6 months, long_term = all time.",
-                }
-            },
-            "required": ["time_range"],
-        },
-    },
-    {
-        "name": "search_tracks",
-        "description": (
-            "Search Spotify's catalog for real, playable tracks. Returns matching "
-            "tracks with their spotify_track_id, title, artist, album and popularity. "
-            "Every track you put in the final playlist MUST come from these search "
-            "results — never invent a track id."
-        ),
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "query": {
-                    "type": "string",
-                    "description": "Search query, e.g. an artist name, song title, or 'genre:indie year:2020-2024'.",
-                },
-                "limit": {
-                    "type": "integer",
-                    "description": "How many results to return (1-10).",
-                },
-            },
-            "required": ["query"],
-        },
-    },
-    {
-        "name": "finalize_playlist",
-        "description": (
-            "Submit the finished playlist. Call this exactly once when you are done "
-            "curating. Every track must come from a prior search_tracks result."
-        ),
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "name": {"type": "string", "description": "A short, catchy playlist name."},
-                "description": {
-                    "type": "string",
-                    "description": "One-sentence playlist description (max ~250 chars).",
-                },
-                "tracks": {
-                    "type": "array",
-                    "description": "The ordered tracklist.",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "spotify_track_id": {"type": "string"},
-                            "title": {"type": "string"},
-                            "artist": {"type": "string"},
-                            "reason": {
-                                "type": "string",
-                                "description": "One short phrase on why this track fits.",
-                            },
-                        },
-                        "required": ["spotify_track_id", "title", "artist", "reason"],
-                    },
-                },
-            },
-            "required": ["name", "description", "tracks"],
-        },
-    },
-]
-
-
-def _build_system_prompt(opts: dict[str, Any]) -> str:
-    length = opts["length"]
-    discovery = opts["mix"]  # 0 = only familiar artists, 100 = mostly new artists
-    explicit = "allowed" if opts["allow_explicit"] else "NOT allowed — exclude explicit tracks"
-    return (
-        "You are Aurafy's expert music curator. You build a Spotify playlist for the "
-        "user from their request and their real listening history.\n\n"
-        "Workflow:\n"
-        "1. Call get_taste_profile to learn their top artists, tracks, and genres.\n"
-        "2. Use search_tracks across several focused queries to gather real, playable "
-        "candidate tracks. Search for specific artists and songs, not just broad genres.\n"
-        "3. When the playlist is cohesive and the right length, call finalize_playlist "
-        "exactly once.\n\n"
-        "Curation rules:\n"
-        f"- Target about {length} tracks.\n"
-        f"- Discovery balance: {discovery}/100 (0 = stick to artists they already love, "
-        "100 = mostly new artists that match the vibe). Blend accordingly.\n"
-        f"- Explicit content is {explicit}.\n"
-        "- Honor the user's described mood, theme, and any constraints above all else.\n"
-        "- Keep the playlist cohesive in energy and vibe; avoid duplicate tracks.\n"
-        "- Every track in finalize_playlist MUST be one you found via search_tracks."
-    )
-
-
-async def _run_get_taste_profile(
-    client: httpx.AsyncClient, access_token: str, time_range: str
+async def spec_from_instruction(
+    instruction: str, top_genres: list[str], top_artists: list[str]
 ) -> dict[str, Any]:
-    from .main import artist_names, normalize_range, spotify_get
-
-    normalized = normalize_range(time_range)
-    top_tracks, top_artists = await asyncio.gather(
-        spotify_get(client, "/me/top/tracks", access_token, {"time_range": normalized, "limit": 30}),
-        spotify_get(client, "/me/top/artists", access_token, {"time_range": normalized, "limit": 30}),
-    )
-
-    artist_items = top_artists.get("items") or []
-    track_items = top_tracks.get("items") or []
-
-    genre_counts: dict[str, int] = {}
-    for artist in artist_items:
-        for genre in artist.get("genres") or []:
-            genre_counts[genre] = genre_counts.get(genre, 0) + 1
-    top_genres = [g for g, _ in sorted(genre_counts.items(), key=lambda kv: -kv[1])[:12]]
-
-    return {
-        "topArtists": [
-            {"name": a.get("name"), "genres": (a.get("genres") or [])[:4]} for a in artist_items
-        ],
-        "topTracks": [{"title": t.get("name"), "artist": artist_names(t)} for t in track_items],
-        "topGenres": top_genres,
-    }
-
-
-async def _run_search_tracks(
-    client: httpx.AsyncClient,
-    access_token: str,
-    query: str,
-    limit: int,
-    seen: dict[str, dict[str, Any]],
-) -> list[dict[str, Any]]:
-    from .main import artist_names, spotify_get
-
-    limit = max(1, min(int(limit or 8), 10))
-    payload = await spotify_get(
-        client, "/search", access_token, {"q": query, "type": "track", "limit": limit}
-    )
-    items = ((payload.get("tracks") or {}).get("items")) or []
-
-    results = []
-    for track in items:
-        track_id = track.get("id")
-        if not track_id:
-            continue
-        meta = {
-            "spotify_track_id": track_id,
-            "title": track.get("name") or "Unknown track",
-            "artist": artist_names(track),
-            "album": (track.get("album") or {}).get("name"),
-            "popularity": track.get("popularity"),
-            "explicit": bool(track.get("explicit")),
-        }
-        seen[track_id] = meta
-        results.append(meta)
-
-    return results
-
-
-async def generate_playlist(
-    session: dict[str, Any], prompt: str, opts: dict[str, Any]
-) -> dict[str, Any]:
-    """Run the agentic loop and return a proposed (uncommitted) playlist."""
+    """Ask Gemini to turn a short instruction into a raw PlaylistSpec dict."""
     from google.genai import types
 
-    from .main import refresh_access_token, to_track_response
+    client = _get_client()
+    prompt = (
+        f"Request: {instruction.strip()}\n\n"
+        f"User's top genres: {', '.join(top_genres) or 'unknown'}\n"
+        f"User's top artists: {', '.join(top_artists) or 'unknown'}"
+    )
+    config = types.GenerateContentConfig(
+        system_instruction=SYSTEM_INSTRUCTION,
+        response_mime_type="application/json",
+        temperature=0.7,
+    )
+    try:
+        response = await asyncio.to_thread(
+            client.models.generate_content, model=MODEL, contents=prompt, config=config
+        )
+    except Exception as exc:  # network / quota / SDK errors
+        message = str(exc)
+        if "RESOURCE_EXHAUSTED" in message or "429" in message:
+            raise HTTPException(
+                status_code=503,
+                detail="The playlist assistant is rate-limited right now. "
+                "Wait a minute and retry, or use the manual controls.",
+            )
+        raise HTTPException(status_code=502, detail=f"Playlist assistant failed: {message[:200]}")
 
-    length = max(MIN_LENGTH, min(int(opts.get("length", 25)), MAX_LENGTH))
-    opts = {
-        "length": length,
-        "mix": max(0, min(int(opts.get("mix", 30)), 100)),
-        "allow_explicit": bool(opts.get("allow_explicit", True)),
-        "range": opts.get("range", "medium_term"),
-    }
+    text = (getattr(response, "text", None) or "").strip()
+    try:
+        spec = json.loads(text)
+    except (json.JSONDecodeError, TypeError):
+        raise HTTPException(
+            status_code=502, detail="Could not understand that request. Try rephrasing it."
+        )
+    if not isinstance(spec, dict):
+        raise HTTPException(status_code=502, detail="The playlist assistant returned an invalid spec.")
+    return spec
+
+
+DISCOVERY_INSTRUCTION = """You are a music curator finding NEW music for one listener.
+
+You get the playlist being built and the listener's taste (top artists and genres).
+Recommend music they most likely DON'T already know but would love, fitting the
+playlist's vibe: adjacent scenes, influences, collaborators, rising acts, deeper cuts.
+Use web search when it helps (current releases, "artists like X", scene lists).
+
+Return ONLY a JSON object with exactly these fields:
+- artists: up to 12 artist names that fit the brief. NEVER include artists from the
+  listener's top list — the point is expansion, not repetition.
+- tracks: up to 15 objects {"title": "...", "artist": "..."} — specific song picks
+  that fit the brief, favoring artists outside the listener's top list.
+
+No commentary, no markdown fences if you can avoid them. Only the JSON object."""
+
+
+def _extract_json(text: str) -> dict[str, Any] | None:
+    """Parse a JSON object out of a model reply that may carry fences/prose."""
+    start, end = text.find("{"), text.rfind("}")
+    if start == -1 or end <= start:
+        return None
+    try:
+        parsed = json.loads(text[start : end + 1])
+    except json.JSONDecodeError:
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+async def discovery_ideas(
+    brief: dict[str, Any], top_genres: list[str], top_artists: list[str]
+) -> dict[str, Any] | None:
+    """Curate discovery candidates for a spec. Returns {"artists": [...],
+    "tracks": [{"title", "artist"}, ...]} or None — callers must treat this as
+    a best-effort enhancement and fall back to plain search discovery."""
+    from google.genai import types
 
     client = _get_client()
-    access_token = await refresh_access_token(session)
-    seen: dict[str, dict[str, Any]] = {}
-    finalized: dict[str, Any] | None = None
-    search_count = 0
-
-    config = types.GenerateContentConfig(
-        system_instruction=_build_system_prompt(opts),
-        tools=[types.Tool(function_declarations=FUNCTION_DECLARATIONS)],
-        temperature=1.0,
+    prompt = (
+        f"Playlist: {brief.get('name') or 'Untitled'} — {brief.get('description') or ''}\n"
+        f"Requested genres/moods: {', '.join(brief.get('genres') or []) or 'open'}\n"
+        f"Novelty: {brief.get('mix', 30)}/100 (higher = push further from their comfort zone)\n\n"
+        f"Listener's top genres: {', '.join(top_genres) or 'unknown'}\n"
+        f"Listener's top artists (do NOT recommend these): {', '.join(top_artists) or 'unknown'}"
     )
-    contents: list[Any] = [types.Content(role="user", parts=[types.Part(text=prompt.strip())])]
-
-    async with httpx.AsyncClient(timeout=20) as http:
-        for _ in range(MAX_ITERATIONS):
+    # Grounded call first (search tool can't be combined with JSON response
+    # mode, hence the lenient parse); plain JSON call as fallback.
+    attempts = [
+        types.GenerateContentConfig(
+            system_instruction=DISCOVERY_INSTRUCTION,
+            tools=[types.Tool(google_search=types.GoogleSearch())],
+            temperature=0.9,
+        ),
+        types.GenerateContentConfig(
+            system_instruction=DISCOVERY_INSTRUCTION,
+            response_mime_type="application/json",
+            temperature=0.9,
+        ),
+    ]
+    for config in attempts:
+        try:
             response = await asyncio.to_thread(
-                client.models.generate_content,
-                model=MODEL,
-                contents=contents,
-                config=config,
+                client.models.generate_content, model=MODEL, contents=prompt, config=config
             )
-
-            candidate = (response.candidates or [None])[0]
-            if candidate is None or candidate.content is None:
-                break
-            contents.append(candidate.content)
-
-            calls = [p.function_call for p in (candidate.content.parts or []) if p.function_call]
-            if not calls:
-                break
-
-            response_parts = []
-            for call in calls:
-                args = dict(call.args or {})
-                if call.name == "get_taste_profile":
-                    result: Any = await _run_get_taste_profile(
-                        http, access_token, args.get("time_range", opts["range"])
-                    )
-                elif call.name == "search_tracks":
-                    if search_count >= MAX_SEARCHES:
-                        result = {"error": "search limit reached, finalize now"}
-                    else:
-                        search_count += 1
-                        result = await _run_search_tracks(
-                            http, access_token, args.get("query", ""), args.get("limit", 8), seen
-                        )
-                elif call.name == "finalize_playlist":
-                    finalized = args
-                    result = {"status": "recorded"}
-                else:
-                    result = {"error": f"unknown tool {call.name}"}
-
-                response_parts.append(
-                    types.Part.from_function_response(
-                        name=call.name, response={"result": result}
-                    )
-                )
-
-            contents.append(types.Content(role="user", parts=response_parts))
-
-            if finalized is not None:
-                break
-
-        if finalized is None:
-            raise RuntimeError("The curator did not finish a playlist. Try a more specific prompt.")
-
-        # Keep only real, de-duplicated tracks the agent actually searched for.
-        ordered_ids: list[str] = []
-        reasons: dict[str, str] = {}
-        for entry in finalized.get("tracks") or []:
-            track_id = entry.get("spotify_track_id")
-            if not track_id or track_id not in seen or track_id in reasons:
-                continue
-            if not opts["allow_explicit"] and seen[track_id].get("explicit"):
-                continue
-            ordered_ids.append(track_id)
-            reasons[track_id] = entry.get("reason") or ""
-        ordered_ids = ordered_ids[:length]
-
-        if not ordered_ids:
-            raise RuntimeError("No playable tracks resolved. Try a more specific prompt.")
-
-        # Hydrate fresh track objects (cover art etc.) in one batch.
-        hydrated = await spotify_get_tracks(http, access_token, ordered_ids)
-
-    tracks = []
-    for rank, track_id in enumerate(ordered_ids, start=1):
-        raw = hydrated.get(track_id)
-        if raw is None:
+        except Exception:
             continue
-        card = to_track_response(raw, rank)
-        card["reason"] = reasons.get(track_id, "")
-        tracks.append(card)
-
-    return {
-        "name": (finalized.get("name") or "Aurafy Mix").strip()[:100],
-        "description": (finalized.get("description") or "").strip()[:300],
-        "tracks": tracks,
-        "trackUris": [f"spotify:track:{track_id}" for track_id in ordered_ids],
-    }
-
-
-async def spotify_get_tracks(
-    client: httpx.AsyncClient, access_token: str, track_ids: list[str]
-) -> dict[str, dict[str, Any]]:
-    from .main import spotify_get
-
-    if not track_ids:
-        return {}
-    payload = await spotify_get(
-        client, "/tracks", access_token, {"ids": ",".join(track_ids[:50])}
-    )
-    return {t["id"]: t for t in (payload.get("tracks") or []) if t and t.get("id")}
+        ideas = _extract_json((getattr(response, "text", None) or "").strip())
+        if not ideas:
+            continue
+        artists = [a for a in (ideas.get("artists") or []) if isinstance(a, str) and a.strip()]
+        tracks = [
+            {"title": t["title"].strip(), "artist": t["artist"].strip()}
+            for t in (ideas.get("tracks") or [])
+            if isinstance(t, dict)
+            and isinstance(t.get("title"), str) and t["title"].strip()
+            and isinstance(t.get("artist"), str) and t["artist"].strip()
+        ]
+        # Belt and braces: drop anything the model echoed from the top list.
+        known = {a.lower() for a in top_artists}
+        artists = [a for a in artists if a.lower() not in known]
+        tracks = [t for t in tracks if t["artist"].lower() not in known]
+        if artists or tracks:
+            return {"artists": artists[:12], "tracks": tracks[:15]}
+    return None

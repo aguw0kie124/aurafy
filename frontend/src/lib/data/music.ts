@@ -132,6 +132,26 @@ export async function syncListeningHistory(force = false) {
 	});
 }
 
+export type LibrarySyncResult = {
+	syncedAt: string;
+	counts: {
+		savedTracks: number;
+		playlists: number;
+		playlistTracks: number;
+		topTracks: number;
+		topArtists: number;
+		recentlyPlayed: number;
+		artists: number;
+		tracks: number;
+	};
+};
+
+// Full library sync — pulls liked songs, playlists, top items, recently-played
+// and artist genres into the DB. Powers the playlist builder's taste profile.
+export async function syncLibrary() {
+	return fetchJson<LibrarySyncResult>('/api/library/sync', { method: 'POST' });
+}
+
 async function fetchJson<T>(path: string, init: RequestInit = {}) {
 	const response = await fetch(`${API_BASE_URL}${path}`, {
 		...init,
@@ -154,43 +174,59 @@ async function fetchJson<T>(path: string, init: RequestInit = {}) {
 	return (await response.json()) as T;
 }
 
-export type ProposedTrack = Track & { reason?: string };
+export type ProposedTrack = {
+	spotifyTrackId?: string;
+	title: string;
+	artist: string;
+	album: string;
+	coverUrl: string | null;
+	externalUrl?: string | null;
+	source?: 'library' | 'discovery' | string;
+};
 
 export type ProposedPlaylist = {
-	generationId: string;
 	name: string;
 	description: string;
 	tracks: ProposedTrack[];
 	trackUris: string[];
 };
 
-export type GeneratePlaylistInput = {
-	prompt: string;
-	length: number;
-	mix: number;
-	allowExplicit: boolean;
-	range: StatsRangeValue;
-};
+export type PlaylistPreviewInput =
+	| { mode: 'instruction'; instruction: string }
+	| {
+			mode: 'params';
+			name?: string;
+			length: number;
+			mix: number;
+			allowExplicit: boolean;
+			genres: string[];
+			seedArtistNames: string[];
+	  };
 
-export async function generatePlaylist(input: GeneratePlaylistInput) {
-	return fetchJson<ProposedPlaylist>('/api/ai/playlist/generate', {
+export async function previewPlaylist(input: PlaylistPreviewInput) {
+	return fetchJson<ProposedPlaylist>('/api/playlist/preview', {
 		method: 'POST',
 		headers: { 'Content-Type': 'application/json' },
 		body: JSON.stringify(input)
 	});
 }
 
-export type CommitPlaylistResult = {
+export type CreatePlaylistResult = {
 	playlistId: string;
 	spotifyUrl: string | null;
 	trackCount: number;
 };
 
-export async function commitPlaylist(generationId: string, isPublic = false) {
-	return fetchJson<CommitPlaylistResult>('/api/ai/playlist/commit', {
+export async function createPlaylist(input: {
+	name: string;
+	description?: string;
+	trackUris: string[];
+	isPublic?: boolean;
+}) {
+	return fetchJson<CreatePlaylistResult>('/api/playlist/create', {
 		method: 'POST',
 		headers: { 'Content-Type': 'application/json' },
-		body: JSON.stringify({ generationId, isPublic })
+		body: JSON.stringify(input)
 	});
 }
 
