@@ -53,6 +53,7 @@ def normalize_spec(spec: dict[str, Any]) -> dict[str, Any]:
     mix = int(spec.get("mix") if spec.get("mix") is not None else 30)
     mix = max(0, min(mix, 100))
     genres = [g.strip().lower() for g in (spec.get("genres") or []) if isinstance(g, str) and g.strip()]
+    avoid = [g.strip().lower() for g in (spec.get("avoid_genres") or []) if isinstance(g, str) and g.strip()]
     seeds = [s for s in (spec.get("seed_artist_names") or []) if isinstance(s, str) and s.strip()]
     return {
         "name": (spec.get("name") or "").strip() or "Aurafy Mix",
@@ -61,6 +62,7 @@ def normalize_spec(spec: dict[str, Any]) -> dict[str, Any]:
         "mix": mix,
         "allow_explicit": bool(spec.get("allow_explicit", True)),
         "genres": genres[:8],
+        "avoid_genres": avoid[:8],
         "seed_artist_names": seeds[:5],
     }
 
@@ -86,6 +88,7 @@ def _cand_from_spotify(track: dict[str, Any], genres_hint: list[str]) -> dict[st
         "popularity": track.get("popularity") or 0,
         "explicit": bool(track.get("explicit")),
         "artist_ids": [a["id"] for a in (track.get("artists") or []) if a.get("id")],
+        "artist_name_list": [a["name"] for a in (track.get("artists") or []) if a.get("name")],
         "genres": list(genres_hint),
     }
 
@@ -105,6 +108,16 @@ def _score(cand: dict[str, Any], genre_w: dict[str, float], artist_w: dict[str, 
 
 def _primary_artist(cand: dict[str, Any]) -> str:
     return cand["artist_ids"][0] if cand["artist_ids"] else cand["artist"]
+
+
+def _matches_any(genre: str, terms: set[str]) -> bool:
+    """Word-boundary match so avoiding "rap" hits "pop rap" but not "trap"."""
+    padded = f" {genre} "
+    return any(f" {term} " in padded for term in terms)
+
+
+def _drop_avoided(cands: list[dict[str, Any]], avoid: set[str]) -> list[dict[str, Any]]:
+    return [c for c in cands if not any(_matches_any(g.lower(), avoid) for g in c["genres"])]
 
 
 def _order_for_variety(cands: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -219,7 +232,10 @@ async def build(session: dict[str, Any], raw_spec: dict[str, Any]) -> dict[str, 
     genre_w = _normalized_weights(genre_rows, "genre")
     artist_w = _normalized_weights(artist_rows, "spotify_artist_id")
 
-    focus_genres = spec["genres"] or [r["genre"] for r in genre_rows[:5]]
+    avoid = set(spec["avoid_genres"])
+    focus_genres = spec["genres"] or [
+        r["genre"] for r in genre_rows if not _matches_any(r["genre"], avoid)
+    ][:5]
     library_ids = await db.get_library_track_ids(user_id)
 
     # Familiar pool (from the stored library). Genre filtering is soft: many
@@ -235,6 +251,7 @@ async def build(session: dict[str, Any], raw_spec: dict[str, Any]) -> dict[str, 
     # Discovery pool (live Spotify + cross-user), excluding anything already owned.
     # Skipped entirely for a pure-library build (mix == 0) so it stays offline.
     discovery: list[dict[str, Any]] = []
+    known: dict[str, list[str]] = {}  # artist id -> DB genre tags
     if spec["mix"] > 0:
         seed_names = spec["seed_artist_names"]
         top_names = [r["name"] for r in artist_rows if r["name"] not in seed_names]
@@ -278,6 +295,38 @@ async def build(session: dict[str, Any], raw_spec: dict[str, Any]) -> dict[str, 
             if c["spotify_track_id"] not in library_ids:
                 seen_disc.setdefault(c["spotify_track_id"], c)
         discovery = list(seen_disc.values())
+
+        # Live-search candidates arrive with at most a search-hint genre, which
+        # can mask what the artist actually is (Drake surfacing in an "r&b"
+        # search). Merge in everything the DB knows about their artists so
+        # avoid-filtering and scoring see the full picture.
+        all_ids = sorted({a for c in discovery for a in c["artist_ids"]})
+        known = await db.get_genres_for_artist_ids(all_ids) if all_ids else {}
+        for c in discovery:
+            merged = set(c["genres"]) | {g for a in c["artist_ids"] for g in known.get(a, [])}
+            c["genres"] = sorted(merged)
+
+    # Exclusions are hard: "no rap" must hold even if it empties a pool
+    # (discovery/backfill then covers the shortfall).
+    if avoid:
+        # Artists the DB has never seen (fresh curator/search finds) have no
+        # tags for the filter to catch — tag them in-memory with one Gemini
+        # call before filtering.
+        unknown_names: set[str] = set()
+        for c in discovery:
+            if any(a not in known for a in c["artist_ids"]):
+                unknown_names.update(c.get("artist_name_list") or [])
+        if unknown_names and playlist_agent.ai_is_configured():
+            try:
+                tagged = await playlist_agent.infer_artist_genres(sorted(unknown_names))
+            except Exception:
+                tagged = {}
+            for c in discovery:
+                extra = {g for n in c.get("artist_name_list") or [] for g in tagged.get(n, [])}
+                if extra:
+                    c["genres"] = sorted(set(c["genres"]) | extra)
+        familiar = _drop_avoided(familiar, avoid)
+        discovery = _drop_avoided(discovery, avoid)
 
     for pool in (familiar, discovery):
         pool.sort(key=lambda c: _score(c, genre_w, artist_w), reverse=True)

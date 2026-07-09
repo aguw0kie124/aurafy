@@ -1,0 +1,31 @@
+# Render blueprint. In the Render dashboard: New > Blueprint, point it at this
+# repo, then fill in the secret values below (marked sync:false) once.
+services:
+  - type: web
+    name: aurafy
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    plan: free
+    healthCheckPath: /health
+    envVars:
+      # Same-origin app URL. Also flips cookies to Secure (starts with https).
+      # Set to your service's URL, e.g. https://aurafy.onrender.com
+      - key: FRONTEND_ORIGIN
+        sync: false
+      # Must be https://<FRONTEND_ORIGIN>/api/auth/spotify/callback AND be
+      # registered in the Spotify developer dashboard.
+      - key: SPOTIFY_REDIRECT_URI
+        sync: false
+      - key: SPOTIFY_CLIENT_ID
+        sync: false
+      - key: SPOTIFY_CLIENT_SECRET
+        sync: false
+      # Supabase Session-pooler connection string (IPv4-capable).
+      - key: SUPABASE_DB_URL
+        sync: false
+      # MUST match the key used to encrypt existing tokens, or all logins break.
+      - key: TOKEN_ENCRYPTION_KEY
+        sync: false
+      # Optional: enables natural-language + AI curation. App works without it.
+      - key: GEMINI_API_KEY
+        sync: false

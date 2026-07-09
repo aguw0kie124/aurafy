@@ -51,3 +51,36 @@ Aurafy is a Spotify playlist builder that uses Gemini AI to generate personalize
    ```text
    http://127.0.0.1:5173
    ```
+
+## Deploy (Render, single origin)
+
+The whole app ships as one Docker image: FastAPI serves the API **and** the
+built Svelte frontend from the same origin, so the session cookie works with no
+CORS setup. Supabase stays as-is (it's already hosted).
+
+1. **Push to GitHub**, then in Render: **New → Blueprint** and select the repo.
+   Render reads [`render.yaml`](render.yaml) and builds the [`Dockerfile`](Dockerfile).
+
+2. **Set the secret env vars** (all marked `sync:false`, so you enter them once
+   in the dashboard):
+   - `FRONTEND_ORIGIN` — your service URL, e.g. `https://aurafy.onrender.com`
+     (this also flips cookies to `Secure` because it starts with `https`).
+   - `SPOTIFY_REDIRECT_URI` — `https://<your-service>.onrender.com/api/auth/spotify/callback`.
+   - `SPOTIFY_CLIENT_ID`, `SPOTIFY_CLIENT_SECRET`.
+   - `SUPABASE_DB_URL` — the Supabase **Session pooler** connection string.
+   - `TOKEN_ENCRYPTION_KEY` — **must match** the key that encrypted existing
+     tokens, or every stored login breaks.
+   - `GEMINI_API_KEY` — optional (AI modes); the builder works without it.
+
+3. **In the Spotify dashboard**, add the same `SPOTIFY_REDIRECT_URI` to the
+   app's Redirect URIs (Spotify requires HTTPS for non-localhost).
+
+4. Deploy. Render health-checks `/health`.
+
+Notes:
+- Spotify apps stay in **development mode** until granted extended quota — only
+  users you add under the app's User Management can log in (max 25).
+- The Render **free plan sleeps after ~15 min idle**; the first request then
+  cold-starts (~30–60s). A paid instance or an uptime pinger avoids this.
+- Build the frontend with `PUBLIC_API_BASE_URL=""` (the Dockerfile does this) so
+  it calls the API with same-origin relative URLs.

@@ -41,6 +41,9 @@ Return ONLY a JSON object with exactly these fields:
 - genres: array of genre strings to focus on. Prefer choosing from the USER'S TOP GENRES
   listed below. There are NO audio features available, so translate any mood words
   (chill, hype, workout, sad, focus, party) into fitting genres.
+- avoid_genres: array of genres to EXCLUDE. Fill this whenever they say things like
+  "no rap", "nothing heavy", "skip country". Include close relatives too (e.g. "no rap"
+  -> ["rap", "hip hop", "trap", "drill"]); otherwise an empty array.
 - seed_artist_names: array of artist names ONLY if they explicitly want music like a
   specific artist; otherwise an empty array.
 
@@ -143,6 +146,7 @@ async def discovery_ideas(
     prompt = (
         f"Playlist: {brief.get('name') or 'Untitled'} — {brief.get('description') or ''}\n"
         f"Requested genres/moods: {', '.join(brief.get('genres') or []) or 'open'}\n"
+        f"STRICTLY AVOID these genres: {', '.join(brief.get('avoid_genres') or []) or 'none'}\n"
         f"Novelty: {brief.get('mix', 30)}/100 (higher = push further from their comfort zone)\n\n"
         f"Listener's top genres: {', '.join(top_genres) or 'unknown'}\n"
         f"Listener's top artists (do NOT recommend these): {', '.join(top_artists) or 'unknown'}"
@@ -186,3 +190,51 @@ async def discovery_ideas(
         if artists or tracks:
             return {"artists": artists[:12], "tracks": tracks[:15]}
     return None
+
+
+GENRE_TAGGING_INSTRUCTION = """You tag music artists with genres.
+
+For EVERY artist name given, return 1-3 lowercase genre tags. Use broad, canonical
+tags (examples: rap, hip hop, trap, drill, r&b, pop, dance pop, edm, house, electronic,
+indie rock, rock, alternative, metal, punk, country, folk, latin, reggaeton, k-pop,
+afrobeats, jazz, soul, classical, lo-fi, ambient, soundtrack). If unsure, give your
+best single guess — never skip an artist.
+
+Return ONLY a JSON object mapping each artist name EXACTLY as given to its array of tags."""
+
+GENRE_TAGGING_CHUNK = 100
+
+
+async def infer_artist_genres(names: list[str]) -> dict[str, list[str]]:
+    """Tag artists with genres via Gemini. Spotify stopped returning artist
+    genres to development-mode apps, so this backfills the content signal the
+    engine's genre weighting/filtering needs. Best-effort: returns whatever
+    subset succeeded (possibly empty)."""
+    from google.genai import types
+
+    client = _get_client()
+    config = types.GenerateContentConfig(
+        system_instruction=GENRE_TAGGING_INSTRUCTION,
+        response_mime_type="application/json",
+        temperature=0.2,
+    )
+    tagged: dict[str, list[str]] = {}
+    for start in range(0, len(names), GENRE_TAGGING_CHUNK):
+        chunk = names[start : start + GENRE_TAGGING_CHUNK]
+        try:
+            response = await asyncio.to_thread(
+                client.models.generate_content,
+                model=MODEL,
+                contents="Artists:\n" + "\n".join(chunk),
+                config=config,
+            )
+        except Exception:
+            continue
+        parsed = _extract_json((getattr(response, "text", None) or "").strip()) or {}
+        for name in chunk:
+            genres = parsed.get(name)
+            if isinstance(genres, list):
+                cleaned = [g.strip().lower() for g in genres if isinstance(g, str) and g.strip()]
+                if cleaned:
+                    tagged[name] = cleaned[:3]
+    return tagged
