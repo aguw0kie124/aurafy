@@ -22,6 +22,7 @@
 	let mix = $state(30);
 	let allowExplicit = $state(true);
 	let genresText = $state('');
+	let avoidText = $state('');
 	let seedText = $state('');
 
 	let status = $state<'idle' | 'loading' | 'ready' | 'error'>('idle');
@@ -57,6 +58,7 @@
 					mix,
 					allowExplicit,
 					genres: parseList(genresText),
+					avoidGenres: parseList(avoidText),
 					seedArtistNames: parseList(seedText)
 				};
 
@@ -127,6 +129,11 @@
 			<label class="field">
 				<span>Focus genres (optional, comma-separated)</span>
 				<input type="text" bind:value={genresText} placeholder="indie rock, dream pop" />
+			</label>
+
+			<label class="field">
+				<span>Avoid genres (optional, comma-separated)</span>
+				<input type="text" bind:value={avoidText} placeholder="rap, country" />
 			</label>
 
 			<label class="field">

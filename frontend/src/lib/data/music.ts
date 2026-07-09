@@ -200,6 +200,7 @@ export type PlaylistPreviewInput =
 			mix: number;
 			allowExplicit: boolean;
 			genres: string[];
+			avoidGenres: string[];
 			seedArtistNames: string[];
 	  };
 

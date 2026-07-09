@@ -121,6 +121,17 @@ async def delete_session(session_id: str) -> None:
     await pool.execute("delete from sessions where id = $1", session_id)
 
 
+async def delete_expired_sessions() -> int:
+    """Purge sessions past their TTL (expired rows are ignored by lookups but
+    otherwise accumulate forever). Run on startup."""
+    result = await pool.execute("delete from sessions where expires_at <= now()")
+    # asyncpg returns a tag like "DELETE 12"; best-effort parse for logging.
+    try:
+        return int(result.split()[-1])
+    except (ValueError, IndexError):
+        return 0
+
+
 # --- library sync ---
 
 
@@ -267,6 +278,47 @@ async def sync_library(user_id: str, payload: dict[str, Any]) -> None:
                     "values ($1, $2, $3) on conflict do nothing",
                     [(user_id, track_id, played_at) for track_id, played_at in play_history],
                 )
+
+
+# --- AI genre backfill (Spotify no longer exposes artist genres) ---
+
+
+async def get_artists_missing_genres(limit: int = 300) -> list[dict[str, str]]:
+    """Artists with no genre rows yet, most recently touched first."""
+    rows = await pool.fetch(
+        """
+        select a.spotify_artist_id, a.name
+        from artists a
+        where not exists (
+            select 1 from artist_genres ag where ag.spotify_artist_id = a.spotify_artist_id
+        )
+        order by a.updated_at desc
+        limit $1
+        """,
+        limit,
+    )
+    return [{"spotify_artist_id": r["spotify_artist_id"], "name": r["name"]} for r in rows]
+
+
+async def insert_artist_genres(genre_rows: list[tuple[str, str]]) -> None:
+    """(spotify_artist_id, genre) pairs; existing pairs are left untouched."""
+    if genre_rows:
+        await pool.executemany(
+            "insert into artist_genres (spotify_artist_id, genre) values ($1, $2) "
+            "on conflict do nothing",
+            genre_rows,
+        )
+
+
+async def get_genres_for_artist_ids(artist_ids: list[str]) -> dict[str, list[str]]:
+    rows = await pool.fetch(
+        "select spotify_artist_id, genre from artist_genres where spotify_artist_id = any($1::text[])",
+        artist_ids,
+    )
+    genres: dict[str, list[str]] = {}
+    for r in rows:
+        genres.setdefault(r["spotify_artist_id"], []).append(r["genre"])
+    return genres
 
 
 # --- taste profile & candidates (playlist builder) ---

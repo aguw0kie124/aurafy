@@ -1,0 +1,13 @@
+**/node_modules
+**/dist
+**/.svelte-kit
+**/__pycache__
+**/*.pyc
+backend/.venv
+.git
+.env
+.env.*
+!.env.example
+db/
+docs/
+*.log

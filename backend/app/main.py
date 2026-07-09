@@ -15,7 +15,8 @@ from urllib.parse import urlencode
 import httpx
 from fastapi import FastAPI, HTTPException, Query, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, RedirectResponse
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from . import db, playlist_agent, playlist_engine
@@ -26,6 +27,9 @@ except ImportError:
     load_dotenv = None
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
+# Built Svelte app, served in single-origin production deploys. Absent in local
+# dev (frontend runs on the Vite server), in which case static serving is off.
+FRONTEND_DIST = (PROJECT_ROOT / "frontend" / "dist").resolve()
 if load_dotenv is not None:
     load_dotenv(PROJECT_ROOT / ".env")
     load_dotenv(PROJECT_ROOT / "backend" / ".env")
@@ -76,6 +80,7 @@ COOKIE_SECURE = FRONTEND_ORIGIN.startswith("https")
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await db.connect()
+    await db.delete_expired_sessions()
     yield
     await db.disconnect()
 
@@ -802,8 +807,35 @@ async def sync_library(request: Request) -> dict[str, Any]:
     }
     await db.sync_library(session["user_id"], payload)
 
+    # Backfill artist genres with Gemini — Spotify stopped returning genres to
+    # development-mode apps, and the builder's genre filtering needs them.
+    # Best-effort: a quota hiccup just leaves some artists untagged until the
+    # next sync.
+    genres_inferred = 0
+    if playlist_agent.ai_is_configured():
+        try:
+            missing = await db.get_artists_missing_genres()
+            if missing:
+                # Distinct names only, but tag every id sharing a name —
+                # Spotify often has duplicate artist ids for the same act.
+                ids_by_name: dict[str, list[str]] = {}
+                for a in missing:
+                    ids_by_name.setdefault(a["name"], []).append(a["spotify_artist_id"])
+                tagged = await playlist_agent.infer_artist_genres(list(ids_by_name))
+                rows = [
+                    (artist_id, genre)
+                    for name, genre_list in tagged.items()
+                    for artist_id in ids_by_name.get(name, [])
+                    for genre in genre_list
+                ]
+                await db.insert_artist_genres(rows)
+                genres_inferred = len(rows)
+        except Exception:
+            pass
+
     return {
         "syncedAt": utc_now_iso(),
+        "genresInferred": genres_inferred,
         "counts": {
             "savedTracks": len(saved_tracks),
             "playlists": len(playlists),
@@ -826,6 +858,7 @@ class PlaylistPreviewRequest(BaseModel):
     mix: int = 30
     allowExplicit: bool = True
     genres: list[str] = []
+    avoidGenres: list[str] = []
     seedArtistNames: list[str] = []
     # instruction mode
     instruction: str | None = None
@@ -868,6 +901,7 @@ async def preview_playlist(request: Request, body: PlaylistPreviewRequest) -> di
             "mix": body.mix,
             "allow_explicit": body.allowExplicit,
             "genres": body.genres,
+            "avoid_genres": body.avoidGenres,
             "seed_artist_names": body.seedArtistNames,
         }
 
@@ -917,3 +951,26 @@ async def create_playlist(request: Request, body: PlaylistCreateRequest) -> dict
         "spotifyUrl": (playlist.get("external_urls") or {}).get("spotify"),
         "trackCount": len(uris),
     }
+
+
+# --- serve the built frontend (single-origin production) ---
+# Registered last so every API route above wins; skipped entirely in local dev
+# where the frontend is served by Vite and this directory doesn't exist.
+if FRONTEND_DIST.is_dir():
+    app.mount(
+        "/assets",
+        StaticFiles(directory=FRONTEND_DIST / "assets"),
+        name="assets",
+    )
+
+    @app.get("/{full_path:path}", include_in_schema=False)
+    async def serve_spa(full_path: str) -> FileResponse:
+        # Unknown API paths should 404 as JSON, not fall back to the SPA shell.
+        if full_path.startswith("api/"):
+            raise HTTPException(status_code=404, detail="Not found")
+        # Serve a real static file (favicon, robots.txt, …) when present;
+        # otherwise hand back index.html so client-side routes deep-link.
+        candidate = (FRONTEND_DIST / full_path).resolve()
+        if full_path and candidate.is_file() and candidate.is_relative_to(FRONTEND_DIST):
+            return FileResponse(candidate)
+        return FileResponse(FRONTEND_DIST / "index.html")
