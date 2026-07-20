@@ -19,7 +19,7 @@ from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import db, playlist_agent, playlist_engine
+from . import db
 
 try:
     from dotenv import load_dotenv
@@ -807,35 +807,9 @@ async def sync_library(request: Request) -> dict[str, Any]:
     }
     await db.sync_library(session["user_id"], payload)
 
-    # Backfill artist genres with Gemini — Spotify stopped returning genres to
-    # development-mode apps, and the builder's genre filtering needs them.
-    # Best-effort: a quota hiccup just leaves some artists untagged until the
-    # next sync.
-    genres_inferred = 0
-    if playlist_agent.ai_is_configured():
-        try:
-            missing = await db.get_artists_missing_genres()
-            if missing:
-                # Distinct names only, but tag every id sharing a name —
-                # Spotify often has duplicate artist ids for the same act.
-                ids_by_name: dict[str, list[str]] = {}
-                for a in missing:
-                    ids_by_name.setdefault(a["name"], []).append(a["spotify_artist_id"])
-                tagged = await playlist_agent.infer_artist_genres(list(ids_by_name))
-                rows = [
-                    (artist_id, genre)
-                    for name, genre_list in tagged.items()
-                    for artist_id in ids_by_name.get(name, [])
-                    for genre in genre_list
-                ]
-                await db.insert_artist_genres(rows)
-                genres_inferred = len(rows)
-        except Exception:
-            pass
-
     return {
         "syncedAt": utc_now_iso(),
-        "genresInferred": genres_inferred,
+        "genresInferred": 0,
         "counts": {
             "savedTracks": len(saved_tracks),
             "playlists": len(playlists),
@@ -873,45 +847,13 @@ class PlaylistCreateRequest(BaseModel):
 
 @app.post("/api/playlist/preview")
 async def preview_playlist(request: Request, body: PlaylistPreviewRequest) -> dict[str, Any]:
-    """Build a proposed (uncommitted) playlist from parameters or a short instruction."""
-    session = await require_session(request)
-
-    if body.mode == "instruction":
-        instruction = (body.instruction or "").strip()
-        if not instruction:
-            raise HTTPException(status_code=400, detail="Describe the playlist you want.")
-        if not playlist_agent.ai_is_configured():
-            raise HTTPException(
-                status_code=503,
-                detail="Natural-language mode isn't configured. Add GEMINI_API_KEY, or use the controls.",
-            )
-        user_id = session["user_id"]
-        genre_rows = await db.get_genre_weights(user_id)
-        artist_rows = await db.get_artist_weights(user_id)
-        spec = await playlist_agent.spec_from_instruction(
-            instruction,
-            [r["genre"] for r in genre_rows[:12]],
-            [r["name"] for r in artist_rows[:12]],
-        )
-    else:
-        spec = {
-            "name": body.name,
-            "description": body.description,
-            "length": body.length,
-            "mix": body.mix,
-            "allow_explicit": body.allowExplicit,
-            "genres": body.genres,
-            "avoid_genres": body.avoidGenres,
-            "seed_artist_names": body.seedArtistNames,
-        }
-
-    proposed = await playlist_engine.build(session, spec)
-    if not proposed["tracks"]:
-        raise HTTPException(
-            status_code=422,
-            detail="Couldn't assemble a playlist. Sync your library or loosen the filters and retry.",
-        )
-    return proposed
+    """Placeholder: the recommender is being rebuilt from scratch
+    (embeddings + ANN + LLM reasoning). Old deterministic engine removed."""
+    await require_session(request)
+    raise HTTPException(
+        status_code=503,
+        detail="The playlist builder is being rebuilt. Check back soon.",
+    )
 
 
 @app.post("/api/playlist/create")
