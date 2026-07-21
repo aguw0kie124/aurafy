@@ -6,7 +6,7 @@
    name ideas (skipped for parameter builds / when Gemini is unconfigured).
 2. RETRIEVE: the user's own library (familiar) + discovery = pgvector nearest-to-
    the-embedded-vibe over the catalog + live Spotify search of the discovery names
-   (new finds are persisted and embedded — the catalog flywheel) + cross-user saves.
+   (new finds are persisted and embedded — the catalog flywheel).
 3. RERANK: ``db.knn_taste_scores`` (taste-fit) blended with vibe similarity and
    popularity; keep the strongest ~40 with metadata.
 4. CURATE (the RAG step): ``llm.curate`` selects + orders the final playlist from
@@ -31,7 +31,6 @@ from . import db, embeddings, llm
 MIN_LENGTH, MAX_LENGTH, DEFAULT_LENGTH = 5, 50, 25
 
 CATALOG_K = 60          # ANN candidates pulled near the vibe vector
-CROSS_USER_LIMIT = 60   # collaborative candidates (empty until several users)
 CURATE_POOL = 40        # retrieved tracks handed to the LLM curator
 # Dev-mode Spotify apps reject search limits above 10, so page with offset.
 SEARCH_PAGE_LIMIT = 10
@@ -285,19 +284,28 @@ async def build(session: dict[str, Any], body: Any) -> dict[str, Any]:
     user_id = session["user_id"]
 
     # 1) INTERPRET — LLM for instruction mode, else straight from UI params.
+    genre_rows = await db.get_genre_weights(user_id)
+    artist_rows = await db.get_artist_weights(user_id)
+    top_genres = [r["genre"] for r in genre_rows[:12]]
+    top_artists = [r["name"] for r in artist_rows[:15]]
+
     spec: dict[str, Any] | None = None
     if getattr(body, "mode", "params") == "instruction" and (body.instruction or "").strip() and llm.is_configured():
-        genre_rows = await db.get_genre_weights(user_id)
-        artist_rows = await db.get_artist_weights(user_id)
-        top_genres = [r["genre"] for r in genre_rows[:12]]
-        top_artists = [r["name"] for r in artist_rows[:15]]
         interpreted = await llm.interpret(body.instruction, top_genres, top_artists)
         if interpreted:
             spec = _normalize_spec(interpreted)
     if spec is None:
         spec = _spec_from_params(body)
-        artist_rows = await db.get_artist_weights(user_id)
-        top_artists = [r["name"] for r in artist_rows[:15]]
+
+    # With no explicit signal at all (bare params build), still give the pipeline
+    # something to work with: default the vibe to the user's top genres, and seed
+    # discovery from their top artists (deeper cuts), so the knobs aren't inert for
+    # a solo user whose catalog is basically just their own library.
+    if not spec["vibe"]:
+        spec["vibe"] = ", ".join(top_genres[:8])
+    if spec["mix"] > 0 and not spec["discovery_artists"]:
+        spec["discovery_artists"] = top_artists[:8]
+
     allow_explicit = spec["allow_explicit"]
     avoid = set(spec["avoid_genres"])
     length = spec["length"]
@@ -330,14 +338,6 @@ async def build(session: dict[str, Any], body: Any) -> dict[str, Any]:
     for c in live:
         c["kind"] = "discovery"
         discovery.setdefault(c["spotify_track_id"], c)
-
-    # 2c) Cross-user saves (collaborative signal; empty until several users).
-    try:
-        for c in await db.get_cross_user_candidates(user_id, allow_explicit, CROSS_USER_LIMIT):
-            c["kind"] = "discovery"
-            discovery.setdefault(c["spotify_track_id"], c)
-    except Exception:
-        pass
 
     discovery_list = [c for c in discovery.values() if c["spotify_track_id"] not in owned]
 
