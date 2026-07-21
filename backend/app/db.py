@@ -335,6 +335,36 @@ async def get_genres_for_artist_ids(artist_ids: list[str]) -> dict[str, list[str
     return genres
 
 
+async def get_track_artist_genres(track_ids: list[str]) -> dict[str, dict[str, Any]]:
+    """For each track id, its artist ids (billing order), artist names, and the
+    union of those artists' genres. Enriches candidates that arrive thin — ANN
+    retrieval rows and live-search finds — so avoid-genre filtering and per-artist
+    caps see the full picture. Missing ids are simply absent from the result."""
+    if not track_ids:
+        return {}
+    rows = await pool.fetch(
+        f"""
+        select t.spotify_track_id,
+               {_ARTIST_IDS_AND_GENRES_SQL},
+               coalesce((select array_agg(a.name order by ta.position)
+                         from track_artists ta
+                         join artists a on a.spotify_artist_id = ta.spotify_artist_id
+                         where ta.spotify_track_id = t.spotify_track_id), '{{}}') as artist_names
+        from tracks t
+        where t.spotify_track_id = any($1::text[])
+        """,
+        track_ids,
+    )
+    return {
+        r["spotify_track_id"]: {
+            "artist_ids": list(r["artist_ids"]),
+            "artist_name_list": list(r["artist_names"]),
+            "genres": list(r["genres"]),
+        }
+        for r in rows
+    }
+
+
 # --- embeddings (recommender vector space) ---
 
 
@@ -401,6 +431,61 @@ async def store_artist_embeddings(pairs: list[tuple[str, list[float]]]) -> None:
         )
 
 
+async def upsert_catalog_tracks(
+    artists: list[dict[str, Any]],
+    tracks: list[dict[str, Any]],
+    track_artists: list[tuple[str, str, int]],
+) -> None:
+    """Persist live-discovery finds into the shared catalog (no per-user rows),
+    so a searched track becomes a first-class, embeddable catalog record — the
+    discovery flywheel. Mirrors the catalog upserts in ``sync_library``. New
+    tracks land with a NULL embedding; the recommender embeds them inline and
+    the next sync's backfill covers any it missed."""
+    if not (artists or tracks or track_artists):
+        return
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            if artists:
+                await conn.executemany(
+                    """
+                    insert into artists
+                        (spotify_artist_id, name, image_url, external_url, popularity, updated_at)
+                    values ($1, $2, $3, $4, $5, now())
+                    on conflict (spotify_artist_id) do update set
+                        name = excluded.name, updated_at = now()
+                    """,
+                    [
+                        (a["spotify_artist_id"], a["name"], a.get("image_url"),
+                         a.get("external_url"), a.get("popularity"))
+                        for a in artists
+                    ],
+                )
+            if tracks:
+                await conn.executemany(
+                    """
+                    insert into tracks
+                        (spotify_track_id, title, artist, album, image_url, external_url,
+                         popularity, explicit, duration_ms, updated_at)
+                    values ($1, $2, $3, $4, $5, $6, $7, $8, $9, now())
+                    on conflict (spotify_track_id) do update set
+                        popularity = excluded.popularity, updated_at = now()
+                    """,
+                    [
+                        (t["spotify_track_id"], t["title"], t["artist"], t.get("album"),
+                         t.get("image_url"), t.get("external_url"), t.get("popularity"),
+                         bool(t.get("explicit")), t.get("duration_ms"))
+                        for t in tracks
+                    ],
+                )
+            if track_artists:
+                await conn.executemany(
+                    "insert into track_artists (spotify_track_id, spotify_artist_id, position) "
+                    "values ($1, $2, $3) "
+                    "on conflict (spotify_track_id, spotify_artist_id) do nothing",
+                    track_artists,
+                )
+
+
 # --- vector retrieval (ANN) & taste ranking (kNN) ---
 
 
@@ -439,6 +524,25 @@ async def vector_search_catalog(
         }
         for r in rows
     ]
+
+
+async def vibe_scores(track_ids: list[str], query_vec: list[float]) -> dict[str, float]:
+    """Cosine similarity (1 - distance) of each track to a query vector. Used to
+    rank the user's *familiar* tracks by how well they fit the request's vibe —
+    taste-fit can't (a library track's nearest library neighbor is itself), so
+    without this the familiar half ignores the request. Missing/unembedded ids
+    are absent from the result."""
+    if not track_ids:
+        return {}
+    rows = await pool.fetch(
+        """
+        select spotify_track_id, 1 - (embedding <=> $2) as similarity
+        from tracks
+        where spotify_track_id = any($1::text[]) and embedding is not null
+        """,
+        track_ids, query_vec,
+    )
+    return {r["spotify_track_id"]: float(r["similarity"]) for r in rows}
 
 
 async def knn_taste_scores(user_id: str, track_ids: list[str], k: int) -> dict[str, float]:
