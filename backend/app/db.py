@@ -17,6 +17,18 @@ pool: asyncpg.Pool | None = None
 _fernet: Fernet | None = None
 
 
+async def _init_connection(conn: asyncpg.Connection) -> None:
+    """Register the pgvector codec so `vector` columns accept/return Python lists.
+    Best-effort: if the extension isn't installed yet (migration not run), vector
+    writes simply no-op via the best-effort embedding backfill until it is."""
+    try:
+        from pgvector.asyncpg import register_vector
+
+        await register_vector(conn)
+    except Exception:
+        pass
+
+
 async def connect() -> None:
     global pool, _fernet
     dsn = os.getenv("SUPABASE_DB_URL")
@@ -25,7 +37,9 @@ async def connect() -> None:
         raise RuntimeError("Set SUPABASE_DB_URL and TOKEN_ENCRYPTION_KEY in .env (see README).")
     _fernet = Fernet(key)
     # statement_cache_size=0 keeps asyncpg compatible with both Supabase pooler modes.
-    pool = await asyncpg.create_pool(dsn, min_size=1, max_size=5, statement_cache_size=0)
+    pool = await asyncpg.create_pool(
+        dsn, min_size=1, max_size=5, statement_cache_size=0, init=_init_connection
+    )
 
 
 async def disconnect() -> None:
@@ -319,6 +333,72 @@ async def get_genres_for_artist_ids(artist_ids: list[str]) -> dict[str, list[str
     for r in rows:
         genres.setdefault(r["spotify_artist_id"], []).append(r["genre"])
     return genres
+
+
+# --- embeddings (recommender vector space) ---
+
+
+async def get_tracks_missing_embeddings(limit: int) -> list[dict[str, Any]]:
+    """Tracks without a vector yet, with the fields needed to build the text doc."""
+    rows = await pool.fetch(
+        """
+        select t.spotify_track_id, t.title, t.artist, t.album,
+               coalesce((select array_agg(distinct ag.genre)
+                         from track_artists ta
+                         join artist_genres ag on ag.spotify_artist_id = ta.spotify_artist_id
+                         where ta.spotify_track_id = t.spotify_track_id), '{}') as genres
+        from tracks t
+        where t.embedding is null
+        limit $1
+        """,
+        limit,
+    )
+    return [
+        {
+            "spotify_track_id": r["spotify_track_id"],
+            "title": r["title"],
+            "artist": r["artist"],
+            "album": r["album"],
+            "genres": list(r["genres"]),
+        }
+        for r in rows
+    ]
+
+
+async def get_artists_missing_embeddings(limit: int) -> list[dict[str, Any]]:
+    """Artists without a vector yet, with their genres for the text doc."""
+    rows = await pool.fetch(
+        """
+        select a.spotify_artist_id, a.name,
+               coalesce((select array_agg(ag.genre) from artist_genres ag
+                         where ag.spotify_artist_id = a.spotify_artist_id), '{}') as genres
+        from artists a
+        where a.embedding is null
+        limit $1
+        """,
+        limit,
+    )
+    return [
+        {"spotify_artist_id": r["spotify_artist_id"], "name": r["name"], "genres": list(r["genres"])}
+        for r in rows
+    ]
+
+
+async def store_track_embeddings(pairs: list[tuple[str, list[float]]]) -> None:
+    """(spotify_track_id, vector) — requires the pgvector codec (see _init_connection)."""
+    if pairs:
+        await pool.executemany(
+            "update tracks set embedding = $2, updated_at = now() where spotify_track_id = $1",
+            pairs,
+        )
+
+
+async def store_artist_embeddings(pairs: list[tuple[str, list[float]]]) -> None:
+    if pairs:
+        await pool.executemany(
+            "update artists set embedding = $2, updated_at = now() where spotify_artist_id = $1",
+            pairs,
+        )
 
 
 # --- taste profile & candidates (playlist builder) ---

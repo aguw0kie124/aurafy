@@ -19,7 +19,7 @@ from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import db
+from . import db, embeddings
 
 try:
     from dotenv import load_dotenv
@@ -807,9 +807,19 @@ async def sync_library(request: Request) -> dict[str, Any]:
     }
     await db.sync_library(session["user_id"], payload)
 
+    # Embed newly-synced tracks/artists into the recommender's vector space
+    # (embed-once; cached). Best-effort: a quota hiccup or missing key just
+    # leaves some items unembedded until the next sync — never fails the sync.
+    embedded = {"tracks": 0, "artists": 0}
+    try:
+        embedded = await embeddings.backfill()
+    except Exception:
+        pass
+
     return {
         "syncedAt": utc_now_iso(),
         "genresInferred": 0,
+        "embedded": embedded,
         "counts": {
             "savedTracks": len(saved_tracks),
             "playlists": len(playlists),
