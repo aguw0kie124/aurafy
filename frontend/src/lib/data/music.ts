@@ -181,7 +181,7 @@ export type ProposedTrack = {
 	album: string;
 	coverUrl: string | null;
 	externalUrl?: string | null;
-	source?: 'library' | 'discovery' | string;
+	source?: 'library' | 'discovery' | 'curated' | string;
 };
 
 export type ProposedPlaylist = {
@@ -191,18 +191,23 @@ export type ProposedPlaylist = {
 	trackUris: string[];
 };
 
-export type PlaylistPreviewInput =
-	| { mode: 'instruction'; instruction: string }
-	| {
-			mode: 'params';
-			name?: string;
-			length: number;
-			mix: number;
-			allowExplicit: boolean;
-			genres: string[];
-			avoidGenres: string[];
-			seedArtistNames: string[];
-	  };
+// Builder v2 (Phase B): describe box + preset + library anchors all coexist in one
+// request. mode drives whether the backend runs the LLM interpret step; every other
+// field is optional and applied regardless of mode.
+export type PlaylistPreviewInput = {
+	mode: 'params' | 'instruction';
+	instruction?: string;
+	name?: string;
+	length?: number;
+	mix?: number;
+	allowExplicit?: boolean;
+	genres?: string[];
+	avoidGenres?: string[];
+	seedArtistNames?: string[];
+	preset?: string;
+	seedTrackIds?: string[];
+	seedArtistIds?: string[];
+};
 
 export async function previewPlaylist(input: PlaylistPreviewInput) {
 	return fetchJson<ProposedPlaylist>('/api/playlist/preview', {
@@ -210,6 +215,30 @@ export async function previewPlaylist(input: PlaylistPreviewInput) {
 		headers: { 'Content-Type': 'application/json' },
 		body: JSON.stringify(input)
 	});
+}
+
+export type LibrarySearchTrack = {
+	spotifyTrackId: string;
+	title: string;
+	artist: string;
+	coverUrl: string | null;
+};
+
+export type LibrarySearchArtist = {
+	spotifyArtistId: string;
+	name: string;
+	imageUrl: string | null;
+};
+
+export type LibrarySearchResult = {
+	tracks: LibrarySearchTrack[];
+	artists: LibrarySearchArtist[];
+};
+
+// Search the user's own library for the builder's anchor picker.
+export async function searchLibrary(q: string, limit = 8) {
+	const query = `q=${encodeURIComponent(q)}&limit=${limit}`;
+	return fetchJson<LibrarySearchResult>(`/api/library/search?${query}`);
 }
 
 export type CreatePlaylistResult = {

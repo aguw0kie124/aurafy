@@ -10,11 +10,8 @@
 		type StatsRangeValue
 	} from '$lib/data/music';
 	import favicon from '$lib/assets/favicon.svg';
-	import Artists from './pages/Artists.svelte';
-	import Songs from './pages/Songs.svelte';
-	import Albums from './pages/Albums.svelte';
 	import Recap from './pages/Recap.svelte';
-	import Build from './pages/Build.svelte';
+	import ForYou from './pages/ForYou.svelte';
 	import './app.css';
 
 	type AuthUser = {
@@ -29,28 +26,21 @@
 	};
 
 	const navItems = [
-		{ label: 'Recap', href: '/' },
-		{ label: 'Artists', href: '/artists' },
-		{ label: 'Songs', href: '/songs' },
-		{ label: 'Albums', href: '/albums' },
-		{ label: 'Build', href: '/build' }
+		{ label: 'For You', href: '/' },
+		{ label: 'Recap', href: '/recap' }
 	] as const;
 
 	const pages = {
-		'/': Recap,
-		'/artists': Artists,
-		'/songs': Songs,
-		'/albums': Albums,
-		'/recap': Recap,
-		'/build': Build
+		'/': ForYou,
+		'/recap': Recap
 	} as const;
 
 	let currentUrl = $state(new URL(window.location.href));
 
 	const currentPath = $derived(currentUrl.pathname);
-	const activePath = $derived(currentPath === '/recap' ? '/' : currentPath);
+	const activePath = $derived(currentPath === '/recap' ? '/recap' : '/');
 	const authError = $derived(currentUrl.searchParams.get('auth_error'));
-	const CurrentPage = $derived(pages[currentPath as keyof typeof pages] ?? Recap);
+	const CurrentPage = $derived(pages[currentPath as keyof typeof pages] ?? ForYou);
 
 	let authStatus = $state<'loading' | 'anonymous' | 'authenticated'>('loading');
 	let user = $state<AuthUser | null>(null);

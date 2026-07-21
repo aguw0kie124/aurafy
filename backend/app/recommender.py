@@ -24,11 +24,28 @@ import asyncio
 from typing import Any
 
 import httpx
+import numpy as np
 from fastapi import HTTPException
 
 from . import db, embeddings, llm
 
 MIN_LENGTH, MAX_LENGTH, DEFAULT_LENGTH = 5, 50, 25
+
+# Starter presets (Phase B): each maps to a semantic vibe sentence embedded into
+# the query vector. `mix` is a hint the frontend uses to preset the segmented
+# Familiar/Balanced/Adventurous control; the backend takes mix from the request.
+PRESETS: dict[str, dict[str, Any]] = {
+    "focus":     {"vibe": "calm, minimal, mostly instrumental focus music — steady, unobtrusive, low energy", "mix": 25},
+    "workout":   {"vibe": "high-energy, driving, upbeat tracks with a strong beat to work out to", "mix": 40},
+    "rainy_day": {"vibe": "mellow, melancholic, introspective rainy-day songs — soft, warm, and slow", "mix": 30},
+    "deep_cuts": {"vibe": "deeper cuts and lesser-known songs by the artists I already love", "mix": 10},
+    "discovery": {"vibe": "fresh, adventurous music just outside my usual taste — new artists and sounds", "mix": 85},
+}
+
+
+def _mean(vectors: list[list[float]]) -> list[float]:
+    """Centroid of a set of embedding vectors (e.g. the picked seed anchors)."""
+    return np.asarray(vectors, dtype=float).mean(axis=0).tolist()
 
 CATALOG_K = 60          # ANN candidates pulled near the vibe vector
 CURATE_POOL = 40        # retrieved tracks handed to the LLM curator
@@ -297,11 +314,28 @@ async def build(session: dict[str, Any], body: Any) -> dict[str, Any]:
     if spec is None:
         spec = _spec_from_params(body)
 
+    # A tapped preset supplies the semantic vibe when the user didn't describe one.
+    preset = getattr(body, "preset", None)
+    if preset in PRESETS and not spec["vibe"]:
+        spec["vibe"] = PRESETS[preset]["vibe"]
+
+    # Anchors picked from the library ("build around these") -> a seed centroid.
+    # Read straight from stored vectors, so seeds give a query vector even with no
+    # Gemini key. This is the precise, grounded signal params mode always lacked.
+    seed_track_ids = list(getattr(body, "seedTrackIds", None) or [])
+    seed_artist_ids = list(getattr(body, "seedArtistIds", None) or [])
+    seed_vecs: list[list[float]] = []
+    if seed_track_ids:
+        seed_vecs += list((await db.get_track_embeddings(seed_track_ids)).values())
+    if seed_artist_ids:
+        seed_vecs += await db.get_artist_track_embeddings(seed_artist_ids, 60)
+    seed_centroid = _mean(seed_vecs) if seed_vecs else None
+
     # With no explicit signal at all (bare params build), still give the pipeline
     # something to work with: default the vibe to the user's top genres, and seed
     # discovery from their top artists (deeper cuts), so the knobs aren't inert for
     # a solo user whose catalog is basically just their own library.
-    if not spec["vibe"]:
+    if not spec["vibe"] and seed_centroid is None:
         spec["vibe"] = ", ".join(top_genres[:8])
     if spec["mix"] > 0 and not spec["discovery_artists"]:
         spec["discovery_artists"] = top_artists[:8]
@@ -316,13 +350,16 @@ async def build(session: dict[str, Any], body: Any) -> dict[str, Any]:
     for c in familiar:
         c["kind"] = "library"
 
-    # Embed the request's vibe once — it drives ANN retrieval AND ranks the
-    # familiar half (whose taste-fit is uniformly ~1.0 and can't discriminate).
+    # The query vector drives ANN retrieval AND ranks the familiar half (whose
+    # taste-fit is uniformly ~1.0 and can't discriminate). It's the mean of the
+    # embedded vibe text and the seed-anchor centroid — whichever are present.
     vibe_vec: list[float] | None = None
     if spec["vibe"].strip() and embeddings.is_configured():
         vecs = await embeddings.embed_texts([spec["vibe"]])
         if vecs and vecs[0] is not None:
             vibe_vec = vecs[0]
+    query_parts = [v for v in (vibe_vec, seed_centroid) if v is not None]
+    vibe_vec = _mean(query_parts) if query_parts else None
 
     discovery: dict[str, dict[str, Any]] = {}
 

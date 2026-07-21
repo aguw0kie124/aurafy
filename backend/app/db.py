@@ -545,6 +545,89 @@ async def vibe_scores(track_ids: list[str], query_vec: list[float]) -> dict[str,
     return {r["spotify_track_id"]: float(r["similarity"]) for r in rows}
 
 
+async def get_track_embeddings(track_ids: list[str]) -> dict[str, list[float]]:
+    """Stored embedding vectors for the given track ids (used to build a seed
+    centroid from anchor songs). Missing / unembedded ids are omitted."""
+    if not track_ids:
+        return {}
+    rows = await pool.fetch(
+        "select spotify_track_id, embedding from tracks "
+        "where spotify_track_id = any($1::text[]) and embedding is not null",
+        track_ids,
+    )
+    return {r["spotify_track_id"]: list(r["embedding"]) for r in rows}
+
+
+async def get_artist_track_embeddings(artist_ids: list[str], limit: int) -> list[list[float]]:
+    """Embedding vectors for catalog tracks by the given artists (for a seed-artist
+    centroid). Most-popular first, capped at ``limit``."""
+    if not artist_ids:
+        return []
+    rows = await pool.fetch(
+        """
+        select t.embedding
+        from tracks t
+        join track_artists ta on ta.spotify_track_id = t.spotify_track_id
+        where ta.spotify_artist_id = any($1::text[]) and t.embedding is not null
+        order by t.popularity desc nulls last
+        limit $2
+        """,
+        artist_ids, limit,
+    )
+    return [list(r["embedding"]) for r in rows]
+
+
+async def search_library(user_id: str, q: str, limit: int) -> dict[str, list[dict[str, Any]]]:
+    """Anchor-picker search: the user's own tracks + artists whose title/name match
+    ``q`` (ILIKE). Returns {"tracks": [...], "artists": [...]} for the builder."""
+    if not q.strip():
+        return {"tracks": [], "artists": []}
+    like = f"%{q.strip()}%"
+    track_rows = await pool.fetch(
+        f"""
+        with lib as ({_LIBRARY_IDS_SQL})
+        select t.spotify_track_id, t.title, t.artist, t.image_url
+        from lib join tracks t on t.spotify_track_id = lib.spotify_track_id
+        where t.title ilike $2 or t.artist ilike $2
+        order by t.popularity desc nulls last
+        limit $3
+        """,
+        user_id, like, limit,
+    )
+    artist_rows = await pool.fetch(
+        f"""
+        with lib as ({_LIBRARY_IDS_SQL})
+        select distinct a.spotify_artist_id, a.name, a.image_url
+        from lib
+        join track_artists ta on ta.spotify_track_id = lib.spotify_track_id
+        join artists a on a.spotify_artist_id = ta.spotify_artist_id
+        where a.name ilike $2
+        order by a.name
+        limit $3
+        """,
+        user_id, like, limit,
+    )
+    return {
+        "tracks": [
+            {
+                "spotifyTrackId": r["spotify_track_id"],
+                "title": r["title"],
+                "artist": r["artist"],
+                "coverUrl": r["image_url"],
+            }
+            for r in track_rows
+        ],
+        "artists": [
+            {
+                "spotifyArtistId": r["spotify_artist_id"],
+                "name": r["name"],
+                "imageUrl": r["image_url"],
+            }
+            for r in artist_rows
+        ],
+    }
+
+
 async def knn_taste_scores(user_id: str, track_ids: list[str], k: int) -> dict[str, float]:
     """kNN taste-fit: for each candidate id, the mean cosine similarity to its ``k``
     nearest tracks in the user's library. Higher = closer to what they already play.
