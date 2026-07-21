@@ -401,6 +401,78 @@ async def store_artist_embeddings(pairs: list[tuple[str, list[float]]]) -> None:
         )
 
 
+# --- vector retrieval (ANN) & taste ranking (kNN) ---
+
+
+async def vector_search_catalog(
+    user_id: str, query_vec: list[float], k: int, allow_explicit: bool
+) -> list[dict[str, Any]]:
+    """ANN retrieval: catalog tracks nearest ``query_vec`` (cosine), excluding
+    tracks the user already owns. Uses the HNSW index; most-similar first.
+    ``similarity`` is 1 - cosine_distance (1.0 = identical, 0.0 = orthogonal)."""
+    rows = await pool.fetch(
+        f"""
+        with lib as ({_LIBRARY_IDS_SQL})
+        select t.spotify_track_id, t.title, t.artist, t.album, t.image_url, t.external_url,
+               t.popularity, t.explicit,
+               1 - (t.embedding <=> $2) as similarity
+        from tracks t
+        where t.embedding is not null
+          and t.spotify_track_id not in (select spotify_track_id from lib)
+          and ($3 or t.explicit = false)
+        order by t.embedding <=> $2
+        limit $4
+        """,
+        user_id, query_vec, allow_explicit, k,
+    )
+    return [
+        {
+            "spotify_track_id": r["spotify_track_id"],
+            "title": r["title"],
+            "artist": r["artist"],
+            "album": r["album"],
+            "image_url": r["image_url"],
+            "external_url": r["external_url"],
+            "popularity": r["popularity"] or 0,
+            "explicit": r["explicit"],
+            "similarity": float(r["similarity"]),
+        }
+        for r in rows
+    ]
+
+
+async def knn_taste_scores(user_id: str, track_ids: list[str], k: int) -> dict[str, float]:
+    """kNN taste-fit: for each candidate id, the mean cosine similarity to its ``k``
+    nearest tracks in the user's library. Higher = closer to what they already play.
+    Returns {track_id: score}; candidates without an embedding are omitted; an empty
+    library yields 0.0."""
+    if not track_ids:
+        return {}
+    rows = await pool.fetch(
+        f"""
+        with lib as (
+            select t.embedding
+            from ({_LIBRARY_IDS_SQL}) owned
+            join tracks t on t.spotify_track_id = owned.spotify_track_id
+            where t.embedding is not null
+        )
+        select c.spotify_track_id,
+               coalesce((
+                   select avg(1 - d) from (
+                       select (l.embedding <=> c.embedding) as d
+                       from lib l
+                       order by d
+                       limit $2
+                   ) nearest
+               ), 0) as taste_score
+        from tracks c
+        where c.spotify_track_id = any($3::text[]) and c.embedding is not null
+        """,
+        user_id, k, track_ids,
+    )
+    return {r["spotify_track_id"]: float(r["taste_score"]) for r in rows}
+
+
 # --- taste profile & candidates (playlist builder) ---
 
 # A user's tracks across sources, each weighted by how strong a taste signal it is.
