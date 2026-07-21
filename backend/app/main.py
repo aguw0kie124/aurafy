@@ -19,7 +19,7 @@ from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import db, embeddings
+from . import db, embeddings, recommender
 
 try:
     from dotenv import load_dotenv
@@ -858,13 +858,10 @@ class PlaylistCreateRequest(BaseModel):
 
 @app.post("/api/playlist/preview")
 async def preview_playlist(request: Request, body: PlaylistPreviewRequest) -> dict[str, Any]:
-    """Placeholder: the recommender is being rebuilt from scratch
-    (embeddings + ANN + LLM reasoning). Old deterministic engine removed."""
-    await require_session(request)
-    raise HTTPException(
-        status_code=503,
-        detail="The playlist builder is being rebuilt. Check back soon.",
-    )
+    """Build a proposed (uncommitted) playlist via the RAG recommender:
+    interpret -> retrieve (pgvector + search) -> rerank (kNN) -> curate -> safety."""
+    session = await require_session(request)
+    return await recommender.build(session, body)
 
 
 @app.post("/api/playlist/create")
