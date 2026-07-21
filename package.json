@@ -1,0 +1,10 @@
+{
+  "name": "aurafy",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Dev convenience scripts. Run from the repo root.",
+  "scripts": {
+    "backend": "cd backend && .venv/bin/uvicorn app.main:app --reload --host 127.0.0.1 --port 5057",
+    "frontend": "cd frontend && npm run dev"
+  }
+}
