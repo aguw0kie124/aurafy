@@ -1,31 +1,33 @@
-"""Track/artist embeddings (Google Gemini) — the recommender's vector space.
+"""Track embeddings (Google Gemini) — the recommender's vector space.
 
-Turns each item's text metadata into a 768-dim vector so semantically similar
+Turns each track's text metadata into a 768-dim vector so semantically similar
 music sits nearby. This is our stand-in for the audio features dev-mode Spotify
 denies: we substitute *textual/cultural* similarity (artist, album, genres) for
 audio similarity.
 
-Best-effort and cached by construction: only items whose stored vector is NULL
-are embedded, so repeated syncs converge without re-work. A quota hiccup just
-leaves some items unembedded until the next sync.
+Free-tier reality: `embed_content` is capped at ~100 items/min (each text counts
+as a request), so `backfill` is throttled and runs in the background, resuming
+across runs via embed-once (only NULL-vector rows are embedded). Artists aren't
+embedded yet — nothing consumes artist vectors.
 """
 
 from __future__ import annotations
 
 import asyncio
 import os
-from typing import Any, Awaitable, Callable
+from typing import Any
 
 from . import db
 
-EMBED_MODEL = "text-embedding-004"  # 768-dim
-EMBED_DIM = 768
+EMBED_MODEL = "gemini-embedding-001"  # text-embedding-004 was retired
+EMBED_DIM = 768                       # matches the tracks.embedding vector(768) column
 
-_BATCH = 100                  # texts per Gemini embed call
-_MAX_TRACKS_PER_SYNC = 2000   # bound the latency of the in-request backfill
-_MAX_ARTISTS_PER_SYNC = 1000
+_BATCH = 50                # texts per embed call
+_RATE_PER_MIN = 90         # stay under the ~100 items/min free-tier cap
 
 _client = None
+_backfill_running = False
+_tasks: set[asyncio.Task] = set()
 
 
 def is_configured() -> bool:
@@ -55,21 +57,20 @@ def track_doc(row: dict[str, Any]) -> str:
     return " — ".join(parts)
 
 
-def artist_doc(row: dict[str, Any]) -> str:
-    """Compact semantic doc for an artist: name + genres."""
-    genres = sorted({g for g in (row.get("genres") or []) if g})
-    return f'{row["name"]} — {", ".join(genres)}' if genres else row["name"]
-
-
 # --- embedding calls --------------------------------------------------------
 
 
 async def _embed_batch(texts: list[str]) -> list[list[float]] | None:
     """Embed one batch; None on any failure (network/quota) so callers skip it."""
+    from google.genai import types
+
     client = _get_client()
     try:
         resp = await asyncio.to_thread(
-            client.models.embed_content, model=EMBED_MODEL, contents=texts
+            client.models.embed_content,
+            model=EMBED_MODEL,
+            contents=texts,
+            config=types.EmbedContentConfig(output_dimensionality=EMBED_DIM),
         )
     except Exception:
         return None
@@ -77,7 +78,8 @@ async def _embed_batch(texts: list[str]) -> list[list[float]] | None:
 
 
 async def embed_texts(texts: list[str]) -> list[list[float] | None]:
-    """Embed many texts, chunked. Returns a per-text vector or None (order kept)."""
+    """Embed a small set of texts (e.g. a query at request time). Not throttled —
+    keep call sizes small. Returns a per-text vector or None (order kept)."""
     out: list[list[float] | None] = []
     for start in range(0, len(texts), _BATCH):
         chunk = texts[start : start + _BATCH]
@@ -86,36 +88,43 @@ async def embed_texts(texts: list[str]) -> list[list[float] | None]:
     return out
 
 
-# --- sync-time backfill -----------------------------------------------------
-
-
-async def _embed_and_store(
-    rows: list[dict[str, Any]],
-    doc_fn: Callable[[dict[str, Any]], str],
-    key: str,
-    store: Callable[[list[tuple[str, list[float]]]], Awaitable[None]],
-) -> int:
-    if not rows:
-        return 0
-    vecs = await embed_texts([doc_fn(r) for r in rows])
-    pairs = [(r[key], v) for r, v in zip(rows, vecs) if v is not None]
-    if pairs:
-        await store(pairs)
-    return len(pairs)
+# --- background backfill ----------------------------------------------------
 
 
 async def backfill() -> dict[str, int]:
-    """Embed any tracks/artists still missing a vector. Best-effort; bounded per
-    call so a large first sync doesn't stall the request (later syncs finish it)."""
-    if not is_configured():
-        return {"tracks": 0, "artists": 0}
-    tracks = await db.get_tracks_missing_embeddings(_MAX_TRACKS_PER_SYNC)
-    artists = await db.get_artists_missing_embeddings(_MAX_ARTISTS_PER_SYNC)
-    return {
-        "tracks": await _embed_and_store(
-            tracks, track_doc, "spotify_track_id", db.store_track_embeddings
-        ),
-        "artists": await _embed_and_store(
-            artists, artist_doc, "spotify_artist_id", db.store_artist_embeddings
-        ),
-    }
+    """Embed tracks missing a vector, throttled under the free-tier rate cap and
+    resumable (embed-once). Stops early on a rate/quota hit — the next run picks
+    up where it left off. Guarded so overlapping syncs don't double-embed."""
+    global _backfill_running
+    if not is_configured() or _backfill_running:
+        return {"tracks": 0}
+    _backfill_running = True
+    done = 0
+    try:
+        while True:
+            rows = await db.get_tracks_missing_embeddings(_BATCH)
+            if not rows:
+                break
+            vecs = await _embed_batch([track_doc(r) for r in rows])
+            if vecs is None:
+                break  # rate/quota or error — resume on the next run
+            pairs = [(r["spotify_track_id"], v) for r, v in zip(rows, vecs) if v is not None]
+            if pairs:
+                await db.store_track_embeddings(pairs)
+                done += len(pairs)
+            # Pace to stay under ~100 items/min.
+            await asyncio.sleep(len(rows) / _RATE_PER_MIN * 60)
+    finally:
+        _backfill_running = False
+    return {"tracks": done}
+
+
+def start_backfill() -> bool:
+    """Kick backfill in the background (non-blocking). Returns True if started,
+    False if unconfigured or already running. Keeps a task ref so it isn't GC'd."""
+    if not is_configured() or _backfill_running:
+        return False
+    task = asyncio.create_task(backfill())
+    _tasks.add(task)
+    task.add_done_callback(_tasks.discard)
+    return True

@@ -807,19 +807,20 @@ async def sync_library(request: Request) -> dict[str, Any]:
     }
     await db.sync_library(session["user_id"], payload)
 
-    # Embed newly-synced tracks/artists into the recommender's vector space
-    # (embed-once; cached). Best-effort: a quota hiccup or missing key just
-    # leaves some items unembedded until the next sync — never fails the sync.
-    embedded = {"tracks": 0, "artists": 0}
+    # Embed newly-synced tracks into the recommender's vector space in the
+    # background (embed-once; cached). The free tier caps embeds at ~100/min, so
+    # this is throttled and non-blocking — it fills in over a few minutes and
+    # resumes on the next sync. Never blocks or fails the sync.
+    embedding_started = False
     try:
-        embedded = await embeddings.backfill()
+        embedding_started = embeddings.start_backfill()
     except Exception:
         pass
 
     return {
         "syncedAt": utc_now_iso(),
         "genresInferred": 0,
-        "embedded": embedded,
+        "embedding": "started" if embedding_started else "skipped",
         "counts": {
             "savedTracks": len(saved_tracks),
             "playlists": len(playlists),
