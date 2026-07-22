@@ -807,6 +807,10 @@ async def sync_library(request: Request) -> dict[str, Any]:
     }
     await db.sync_library(session["user_id"], payload)
 
+    # A fresh library means the cached For You feed is stale — drop it so the next
+    # visit rebuilds against the new tracks.
+    recommender.invalidate_feed(session["user_id"])
+
     # Embed newly-synced tracks into the recommender's vector space in the
     # background (embed-once; cached). The free tier caps embeds at ~100/min, so
     # this is throttled and non-blocking — it fills in over a few minutes and
@@ -879,11 +883,12 @@ async def library_search(
 
 
 @app.get("/api/recommendations")
-async def recommendations(request: Request) -> dict[str, Any]:
+async def recommendations(request: Request, refresh: bool = Query(False)) -> dict[str, Any]:
     """The For You feed: recommendation song rows + curated taste-mode playlists,
-    with new music sourced live from Spotify. Rebuilt on each request."""
+    with new music sourced live from Spotify. Cached per user; ``?refresh=1`` (the
+    Refresh button) rebuilds it."""
     session = await require_session(request)
-    return await recommender.recommend(session)
+    return await recommender.recommend(session, force=refresh)
 
 
 @app.post("/api/playlist/create")

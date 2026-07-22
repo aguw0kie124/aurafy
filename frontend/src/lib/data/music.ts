@@ -263,10 +263,11 @@ export type Recommendations = {
 	playlists: RecPlaylist[];
 };
 
-// The For You feed: new-song rows + curated taste-mode playlists. Rebuilt each call
-// (server does live discovery + clustering), so expect a multi-second response.
-export async function recommendations() {
-	return fetchJson<Recommendations>('/api/recommendations');
+// The For You feed: new-song rows + curated taste-mode playlists. Cached per user on
+// the server; pass refresh=true (the Refresh button) to rebuild — that call does live
+// discovery + clustering and takes several seconds.
+export async function recommendations(refresh = false) {
+	return fetchJson<Recommendations>(`/api/recommendations${refresh ? '?refresh=1' : ''}`);
 }
 
 export type CreatePlaylistResult = {

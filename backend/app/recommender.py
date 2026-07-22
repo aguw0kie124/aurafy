@@ -21,6 +21,7 @@ back to a deterministic taste-ranked build, so a build never hard-fails.
 from __future__ import annotations
 
 import asyncio
+import time
 from typing import Any
 
 import httpx
@@ -521,6 +522,16 @@ MAX_LIKED_ROWS = 3      # "Because you liked X" rows
 MAX_CLUSTERS = 4        # taste-mode playlists
 NEAR_K = 40             # candidates pulled per ANN query before dedupe/cap
 
+# The feed is ~20s to build (live discovery + Spotify search), so cache it per user
+# and serve instantly on revisits; the Refresh button (force=True) rebuilds on demand.
+FEED_TTL = 1800         # seconds a cached feed stays fresh (30 min)
+_feed_cache: dict[str, dict[str, Any]] = {}
+
+
+def invalidate_feed(user_id: str) -> None:
+    """Drop a user's cached feed (e.g. after a library sync) so the next visit rebuilds."""
+    _feed_cache.pop(user_id, None)
+
 
 def _dedupe_cap(cands: list[dict[str, Any]], n: int) -> list[dict[str, Any]]:
     """Dedupe (id + title/artist), cap per primary artist, order for variety, take n."""
@@ -584,12 +595,16 @@ def _library_clusters(lib: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return clusters
 
 
-async def recommend(session: dict[str, Any]) -> dict[str, Any]:
+async def recommend(session: dict[str, Any], force: bool = False) -> dict[str, Any]:
     """The For You feed: rows of individual new songs + curated taste-mode playlists.
     One shared discovery pool (grounded LLM ideas → live Spotify search → embed) feeds
-    everything; rows/playlists are sliced by vector similarity, so the whole feed costs
-    ~2 Gemini calls (discovery + naming). Rebuilt each visit; degrades gracefully."""
+    everything; rows/playlists are sliced by vector similarity. Cached per user for
+    FEED_TTL; ``force=True`` (the Refresh button) rebuilds. Degrades gracefully."""
     user_id = session["user_id"]
+    if not force:
+        cached = _feed_cache.get(user_id)
+        if cached and (time.monotonic() - cached["at"]) < FEED_TTL:
+            return cached["feed"]
     allow_explicit = True
 
     owned = await db.get_library_track_ids(user_id)
@@ -640,17 +655,17 @@ async def recommend(session: dict[str, Any]) -> dict[str, Any]:
             })
             liked_rows += 1
 
-    # 3) Curated playlists — one per taste mode (deterministic) + Fresh Finds.
+    # 3) Curated playlists — one per taste mode (deterministic) + Fresh Finds. Named
+    #    statically from each mode's most representative artist (no LLM naming call).
     playlists: list[dict[str, Any]] = []
-    to_name: list[dict[str, Any]] = []
     clusters = _library_clusters(await db.get_user_library_vectors(user_id))
     for i, cl in enumerate(clusters[:MAX_CLUSTERS]):
         near = await db.vector_search_catalog(user_id, cl["centroid"], NEAR_K, allow_explicit)
         tracks = _dedupe_cap([{**c, "kind": "discovery"} for c in near], PLAYLIST_LEN)
         if len(tracks) >= 8:
-            key = f"cluster_{i}"
-            playlists.append(_playlist_shape(key, "Your taste, expanded", tracks))
-            to_name.append({"key": key, "tracks": cl["representative_tracks"]})
+            reps = cl["representative_tracks"]
+            name = f"{reps[0]['artist']} & similar" if reps else f"Taste Mix {i + 1}"
+            playlists.append(_playlist_shape(f"cluster_{i}", "A slice of your taste", tracks, name=name))
 
     # Fresh Finds — the freshest picks (popular new tracks you don't own).
     fresh = _dedupe_cap(
@@ -659,20 +674,9 @@ async def recommend(session: dict[str, Any]) -> dict[str, Any]:
     if len(fresh) >= 8:
         playlists.append(_playlist_shape("fresh_finds", "New music picked for you", fresh, name="Fresh Finds"))
 
-    # 4) Name the taste-mode playlists from their representative tracks (one LLM call).
-    if to_name and llm.is_configured():
-        try:
-            named = await llm.describe_shelves(to_name)
-        except Exception:
-            named = {}
-        for p in playlists:
-            if p["name"] is None:
-                p["name"] = named.get(p["key"])
-    for idx, p in enumerate(playlists):
-        if p["name"] is None:
-            p["name"] = f"Taste Mix {idx + 1}"
-
-    return {"rows": rows, "playlists": playlists}
+    result = {"rows": rows, "playlists": playlists}
+    _feed_cache[user_id] = {"feed": result, "at": time.monotonic()}
+    return result
 
 
 def _playlist_shape(

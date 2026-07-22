@@ -28,6 +28,7 @@
 
 	let feed = $state<Recommendations | null>(null);
 	let feedStatus = $state<'loading' | 'ready' | 'error'>('loading');
+	let refreshing = $state(false);
 
 	let modalOpen = $state(false);
 	let modalLoading = $state(false);
@@ -38,13 +39,18 @@
 
 	onMount(loadFeed);
 
-	async function loadFeed() {
-		feedStatus = 'loading';
+	async function loadFeed(refresh = false) {
+		// On refresh keep the current feed visible and just spin the button; only the
+		// first (cold) load shows the full skeletons.
+		if (refresh) refreshing = true;
+		else feedStatus = 'loading';
 		try {
-			feed = await recommendations();
+			feed = await recommendations(refresh);
 			feedStatus = 'ready';
 		} catch {
-			feedStatus = 'error';
+			if (!refresh) feedStatus = 'error';
+		} finally {
+			refreshing = false;
 		}
 	}
 
@@ -75,6 +81,16 @@
 
 <section class="page-header">
 	<SectionHeading title="For You" subtitle="New music, picked from what you love." />
+	<button
+		type="button"
+		class="refresh"
+		onclick={() => loadFeed(true)}
+		disabled={refreshing || feedStatus === 'loading'}
+		title="Rebuild your feed with fresh picks"
+	>
+		<RefreshCw size={16} strokeWidth={2.2} class={refreshing ? 'spin' : undefined} />
+		{refreshing ? 'Refreshing…' : 'Refresh'}
+	</button>
 </section>
 
 <!-- AI describe bar -->
@@ -124,7 +140,7 @@
 {:else if feedStatus === 'error'}
 	<div class="notice">
 		<p>Couldn’t load your recommendations.</p>
-		<button type="button" class="ghost" onclick={loadFeed}>
+		<button type="button" class="ghost" onclick={() => loadFeed()}>
 			<RefreshCw size={16} strokeWidth={2.2} /> Try again
 		</button>
 	</div>
@@ -200,7 +216,40 @@
 
 <style>
 	.page-header {
+		display: flex;
+		align-items: end;
+		justify-content: space-between;
+		gap: 16px;
 		margin-bottom: 20px;
+	}
+
+	.refresh {
+		display: inline-flex;
+		align-items: center;
+		gap: 8px;
+		min-height: 38px;
+		padding: 0 16px;
+		border: 1px solid var(--color-border);
+		border-radius: 999px;
+		background: transparent;
+		color: var(--color-soft);
+		font-weight: 700;
+		font-size: 0.86rem;
+		cursor: pointer;
+		flex: 0 0 auto;
+		transition:
+			background 160ms ease,
+			color 160ms ease;
+	}
+
+	.refresh:hover:not(:disabled) {
+		background: #1f1f1f;
+		color: #fff;
+	}
+
+	.refresh:disabled {
+		opacity: 0.55;
+		cursor: progress;
 	}
 
 	/* describe bar */
