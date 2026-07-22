@@ -9,23 +9,24 @@ saved straight to your Spotify account as a playlist.
 ## How it works
 
 Spotify no longer exposes audio features to new apps, so Aurafy can't compare
-songs by sound. Instead it compares them by **text** — title, artist, album,
-genres — embedded into 768-dim vectors with Gemini and stored in Postgres via
-`pgvector`.
+songs by sound. Instead it compares them by text. Each track's title, artist,
+album, and genres are embedded into a 768-dim vector with Gemini and stored in
+Postgres using `pgvector`.
 
-For the feed: your top artists/genres seed a discovery pool (Gemini suggests
-names → live Spotify search resolves them to real tracks → new tracks are
-persisted and embedded, growing a shared catalog). Candidates are then scored
-by a **kNN taste-fit** against your library's embeddings, blended with vibe
-similarity and popularity, and sliced into rows/playlists.
+For the feed, your top artists and genres seed a discovery pool. Gemini
+suggests artist and track names, live Spotify search resolves those into real
+tracks, and new tracks get persisted and embedded, growing a shared catalog
+over time. Candidates are then scored with a kNN taste-fit lookup against your
+library's embeddings, blended with vibe similarity and popularity, and sliced
+into feed rows and playlists.
 
-The natural-language playlist builder runs the same pieces as a **RAG**
-pipeline: interpret the request → retrieve candidates (pgvector ANN + kNN
-rerank) → have Gemini curate/order the final list *from that retrieved set
-only*. Returned track ids are validated against what was retrieved, so the
-model can't hallucinate a track into the playlist.
+The natural-language playlist builder runs the same pieces as a RAG pipeline.
+It interprets the request, retrieves candidates with a pgvector ANN search and
+a kNN rerank, and has Gemini curate and order the final list from that
+retrieved set only. Returned track ids are validated against what was
+retrieved, so the model can't hallucinate a track into the playlist.
 
-Gemini is optional throughout — without a key, both the feed and builder fall
+Gemini is optional throughout. Without a key, both the feed and builder fall
 back to a deterministic taste-ranked sort instead of LLM curation.
 
 ## Tech stack
@@ -79,35 +80,8 @@ and a Spotify developer app. A Gemini key is optional.
 
 6. **Open** [http://127.0.0.1:5173](http://127.0.0.1:5173) and sign in with Spotify.
 
-## Deploy (Render, single origin)
+## Deploy
 
-The whole app ships as one Docker image: FastAPI serves the API **and** the
-built Svelte frontend from the same origin, so the session cookie works with no
-CORS setup. Supabase stays as-is (it's already hosted).
-
-1. **Push to GitHub**, then in Render: **New → Blueprint** and select the repo.
-   Render reads [`render.yaml`](render.yaml) and builds the [`Dockerfile`](Dockerfile).
-
-2. **Set the secret env vars** (all marked `sync:false`, so you enter them once
-   in the dashboard):
-   - `FRONTEND_ORIGIN` — your service URL, e.g. `https://aurafy.onrender.com`
-     (this also flips cookies to `Secure` because it starts with `https`).
-   - `SPOTIFY_REDIRECT_URI` — `https://<your-service>.onrender.com/api/auth/spotify/callback`.
-   - `SPOTIFY_CLIENT_ID`, `SPOTIFY_CLIENT_SECRET`.
-   - `SUPABASE_DB_URL` — the Supabase **Session pooler** connection string.
-   - `TOKEN_ENCRYPTION_KEY` — **must match** the key that encrypted existing
-     tokens, or every stored login breaks.
-   - `GEMINI_API_KEY` — optional (AI modes); the feed and builder work without it.
-
-3. **In the Spotify dashboard**, add the same `SPOTIFY_REDIRECT_URI` to the
-   app's Redirect URIs (Spotify requires HTTPS for non-localhost).
-
-4. Deploy. Render health-checks `/health`.
-
-Notes:
-- Spotify apps stay in **development mode** until granted extended quota — only
-  users you add under the app's User Management can log in (max 25).
-- The Render **free plan sleeps after ~15 min idle**; the first request then
-  cold-starts (~30–60s). A paid instance or an uptime pinger avoids this.
-- Build the frontend with `PUBLIC_API_BASE_URL=""` (the Dockerfile does this) so
-  it calls the API with same-origin relative URLs.
+The project deploys as a single Docker image (see [`Dockerfile`](Dockerfile) and
+[`render.yaml`](render.yaml)) to Render, with FastAPI serving both the API and
+the built frontend from one origin.
