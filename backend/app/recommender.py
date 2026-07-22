@@ -38,12 +38,6 @@ def _mean(vectors: list[list[float]]) -> list[float]:
     return np.asarray(vectors, dtype=float).mean(axis=0).tolist()
 
 
-def _cosine(a: list[float], b: list[float]) -> float:
-    """Cosine similarity of two embedding vectors (0.0 when either is a zero vector)."""
-    va, vb = np.asarray(a, dtype=float), np.asarray(b, dtype=float)
-    denom = float(np.linalg.norm(va) * np.linalg.norm(vb))
-    return float(va @ vb / denom) if denom else 0.0
-
 CATALOG_K = 60          # ANN candidates pulled near the vibe vector
 CURATE_POOL = 40        # retrieved tracks handed to the LLM curator
 # Dev-mode Spotify apps reject search limits above 10, so page with offset.
@@ -490,10 +484,8 @@ async def _infer_missing_genres(cands: list[dict[str, Any]]) -> None:
 ROW_LEN = 15            # tracks per recommendation row
 PLAYLIST_LEN = 25       # tracks per curated playlist
 MAX_LIKED_ROWS = 3      # "Because you liked X" rows
-MAX_CLUSTERS = 4        # "{artist} & similar" taste playlists
+MAX_CLUSTERS = 4        # taste-mode playlists
 NEAR_K = 40             # candidates pulled per ANN query before dedupe/cap
-ARTIST_SCAN = 12        # top taste artists scanned to seed the taste playlists
-CLUSTER_SIM_MAX = 0.9   # skip a seed artist this close to one already used (diversity)
 
 # The feed is ~20s to build (live discovery + Spotify search), so cache it per user
 # and serve instantly on revisits; the Refresh button (force=True) rebuilds on demand.
@@ -528,6 +520,44 @@ def _dedupe_cap(cands: list[dict[str, Any]], n: int) -> list[dict[str, Any]]:
         counts[primary] = counts.get(primary, 0) + 1
         out.append(c)
     return _order_for_variety(out)
+
+
+def _library_clusters(lib: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """k-means over the user's library vectors → distinct taste modes. Each cluster:
+    ``{centroid, size, representative_tracks}`` (the members nearest the centroid, used
+    to name + seed a playlist). A small library collapses to a single centroid."""
+    if not lib:
+        return []
+    vecs = [t["embedding"] for t in lib]
+    n = len(lib)
+    if n < 15:
+        return [{
+            "centroid": _mean(vecs),
+            "size": n,
+            "representative_tracks": [{"title": t["title"], "artist": t["artist"]} for t in lib[:5]],
+        }]
+    from sklearn.cluster import KMeans
+
+    X = np.asarray(vecs, dtype=float)
+    k = min(5, max(2, n // 40))
+    labels = KMeans(n_clusters=k, n_init=10, random_state=0).fit_predict(X)
+    clusters: list[dict[str, Any]] = []
+    for ci in range(k):
+        idx = [i for i, lbl in enumerate(labels) if lbl == ci]
+        if not idx:
+            continue
+        centroid = X[idx].mean(axis=0)
+        nearest = sorted(idx, key=lambda i: float(np.linalg.norm(X[i] - centroid)))[:5]
+        clusters.append({
+            "centroid": centroid.tolist(),
+            "size": len(idx),
+            "representative_tracks": [
+                {"title": lib[i]["title"], "artist": lib[i]["artist"]} for i in nearest
+            ],
+        })
+    # Biggest taste modes first.
+    clusters.sort(key=lambda c: c["size"], reverse=True)
+    return clusters
 
 
 async def recommend(session: dict[str, Any], force: bool = False) -> dict[str, Any]:
@@ -581,29 +611,17 @@ async def recommend(session: dict[str, Any], force: bool = False) -> dict[str, A
             })
             liked_rows += 1
 
-    # 3) Curated playlists — one "{artist} & similar" per top taste artist + Fresh
-    #    Finds. Each is the nearest catalog around that artist's own track centroid;
-    #    a diversity guard skips an artist whose centroid is too close to one already
-    #    used, so the playlists span different corners of the taste (no KMeans needed).
+    # 3) Curated playlists — one per taste mode (deterministic) + Fresh Finds. Named
+    #    statically from each mode's most representative artist (no LLM naming call).
     playlists: list[dict[str, Any]] = []
-    used_centroids: list[list[float]] = []
-    for row in artist_rows[:ARTIST_SCAN]:
-        if len(playlists) >= MAX_CLUSTERS:
-            break
-        vecs = await db.get_artist_track_embeddings([row["spotify_artist_id"]], 60)
-        if not vecs:
-            continue
-        centroid = _mean(vecs)
-        if any(_cosine(centroid, used) > CLUSTER_SIM_MAX for used in used_centroids):
-            continue
-        near = await db.vector_search_catalog(user_id, centroid, NEAR_K, allow_explicit)
+    clusters = _library_clusters(await db.get_user_library_vectors(user_id))
+    for i, cl in enumerate(clusters[:MAX_CLUSTERS]):
+        near = await db.vector_search_catalog(user_id, cl["centroid"], NEAR_K, allow_explicit)
         tracks = _dedupe_cap([{**c, "kind": "discovery"} for c in near], PLAYLIST_LEN)
         if len(tracks) >= 8:
-            used_centroids.append(centroid)
-            playlists.append(_playlist_shape(
-                f"artist_{row['spotify_artist_id']}", "A slice of your taste",
-                tracks, name=f"{row['name']} & similar",
-            ))
+            reps = cl["representative_tracks"]
+            name = f"{reps[0]['artist']} & similar" if reps else f"Taste Mix {i + 1}"
+            playlists.append(_playlist_shape(f"cluster_{i}", "A slice of your taste", tracks, name=name))
 
     # Fresh Finds — the freshest picks (popular new tracks you don't own).
     fresh = _dedupe_cap(
