@@ -241,6 +241,34 @@ export async function searchLibrary(q: string, limit = 8) {
 	return fetchJson<LibrarySearchResult>(`/api/library/search?${query}`);
 }
 
+// --- For You recommendations feed ---
+
+export type RecRow = {
+	key: string;
+	caption: string;
+	tracks: ProposedTrack[];
+};
+
+export type RecPlaylist = {
+	key: string;
+	name: string;
+	description: string;
+	coverUrl: string | null;
+	tracks: ProposedTrack[];
+	trackUris: string[];
+};
+
+export type Recommendations = {
+	rows: RecRow[];
+	playlists: RecPlaylist[];
+};
+
+// The For You feed: new-song rows + curated taste-mode playlists. Rebuilt each call
+// (server does live discovery + clustering), so expect a multi-second response.
+export async function recommendations() {
+	return fetchJson<Recommendations>('/api/recommendations');
+}
+
 export type CreatePlaylistResult = {
 	playlistId: string;
 	spotifyUrl: string | null;
