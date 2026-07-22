@@ -559,22 +559,13 @@ async def recommend(session: dict[str, Any], force: bool = False) -> dict[str, A
     pool = await _live_discovery(session, disc_spec, owned)
     await _persist_and_embed(pool)
     await _enrich_genres(pool)
-    taste = await db.knn_taste_scores(user_id, [c["spotify_track_id"] for c in pool], 5)
     for c in pool:
-        c["taste"] = taste.get(c["spotify_track_id"], 0.0)
         c["kind"] = "discovery"
 
     rows: list[dict[str, Any]] = []
 
-    # 2a) For You — the new songs closest to the user's taste.
-    for_you = _dedupe_cap(
-        sorted(pool, key=lambda c: (c["taste"], c.get("popularity") or 0), reverse=True), ROW_LEN
-    )
-    if len(for_you) >= 5:
-        rows.append({"key": "for_you", "caption": "For You", "tracks": [_output_track(c) for c in for_you]})
-
-    # 2b) Because you liked <track> — nearest non-owned catalog tracks to recent likes
-    #     (now includes the freshly-embedded discovery finds via the catalog).
+    # 2) Because you liked <track> — nearest non-owned catalog tracks to recent likes
+    #    (now includes the freshly-embedded discovery finds via the catalog).
     seeds = await db.get_seed_tracks(user_id, MAX_LIKED_ROWS * 2)
     liked_rows = 0
     for seed in seeds:

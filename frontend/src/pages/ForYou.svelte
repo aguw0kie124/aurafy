@@ -146,6 +146,27 @@
 	</div>
 {:else if feed}
 	<div class="feed">
+		{#if feed.playlists.length}
+			<section class="shelf">
+				<h2>Made for you</h2>
+				<div class="playlist-grid">
+					{#each feed.playlists as playlist (playlist.key)}
+						<button type="button" class="playlist-card" onclick={() => openPlaylist(playlist)}>
+							<MediaThumb
+								kind="cover"
+								src={playlist.coverUrl}
+								alt={`${playlist.name} cover`}
+								size="large"
+								label={playlist.name}
+							/>
+							<strong>{playlist.name}</strong>
+							<small>{playlist.description}</small>
+						</button>
+					{/each}
+				</div>
+			</section>
+		{/if}
+
 		{#each feed.rows as row (row.key)}
 			<section class="shelf">
 				<h2>{row.caption}</h2>
@@ -177,27 +198,6 @@
 				</div>
 			</section>
 		{/each}
-
-		{#if feed.playlists.length}
-			<section class="shelf">
-				<h2>Made for you</h2>
-				<div class="playlist-grid">
-					{#each feed.playlists as playlist (playlist.key)}
-						<button type="button" class="playlist-card" onclick={() => openPlaylist(playlist)}>
-							<MediaThumb
-								kind="cover"
-								src={playlist.coverUrl}
-								alt={`${playlist.name} cover`}
-								size="large"
-								label={playlist.name}
-							/>
-							<strong>{playlist.name}</strong>
-							<small>{playlist.description}</small>
-						</button>
-					{/each}
-				</div>
-			</section>
-		{/if}
 
 		{#if !feed.rows.length && !feed.playlists.length}
 			<div class="notice">
