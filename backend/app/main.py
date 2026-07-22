@@ -839,22 +839,12 @@ async def sync_library(request: Request) -> dict[str, Any]:
 
 
 class PlaylistPreviewRequest(BaseModel):
-    mode: str = "params"  # "params" | "instruction"
-    # params mode
+    mode: str = "instruction"
+    instruction: str | None = None
+    length: int = 25
+    allowExplicit: bool = True
     name: str | None = None
     description: str | None = None
-    length: int = 25
-    mix: int = 30
-    allowExplicit: bool = True
-    genres: list[str] = []
-    avoidGenres: list[str] = []
-    seedArtistNames: list[str] = []
-    # instruction mode
-    instruction: str | None = None
-    # builder v2 (Phase B): a starter preset + anchors picked from the library
-    preset: str | None = None
-    seedTrackIds: list[str] = []
-    seedArtistIds: list[str] = []
 
 
 class PlaylistCreateRequest(BaseModel):

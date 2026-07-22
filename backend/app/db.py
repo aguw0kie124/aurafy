@@ -485,21 +485,8 @@ def _to_list(vec: Any) -> list[float]:
     return list(vec)
 
 
-async def get_track_embeddings(track_ids: list[str]) -> dict[str, list[float]]:
-    """Stored embedding vectors for the given track ids (used to build a seed
-    centroid from anchor songs). Missing / unembedded ids are omitted."""
-    if not track_ids:
-        return {}
-    rows = await pool.fetch(
-        "select spotify_track_id, embedding from tracks "
-        "where spotify_track_id = any($1::text[]) and embedding is not null",
-        track_ids,
-    )
-    return {r["spotify_track_id"]: _to_list(r["embedding"]) for r in rows}
-
-
 async def get_artist_track_embeddings(artist_ids: list[str], limit: int) -> list[list[float]]:
-    """Embedding vectors for catalog tracks by the given artists (for a seed-artist
+    """Embedding vectors for catalog tracks by the given artists (for an artist
     centroid). Most-popular first, capped at ``limit``."""
     if not artist_ids:
         return []
@@ -515,29 +502,6 @@ async def get_artist_track_embeddings(artist_ids: list[str], limit: int) -> list
         artist_ids, limit,
     )
     return [_to_list(r["embedding"]) for r in rows]
-
-
-async def get_user_library_vectors(user_id: str) -> list[dict[str, Any]]:
-    """The user's library tracks that have an embedding, with light metadata — for
-    taste-mode clustering and centroids. ``embedding`` is a python list of floats."""
-    rows = await pool.fetch(
-        f"""
-        with lib as ({_LIBRARY_IDS_SQL})
-        select t.spotify_track_id, t.title, t.artist, t.embedding
-        from lib join tracks t on t.spotify_track_id = lib.spotify_track_id
-        where t.embedding is not null
-        """,
-        user_id,
-    )
-    return [
-        {
-            "spotify_track_id": r["spotify_track_id"],
-            "title": r["title"],
-            "artist": r["artist"],
-            "embedding": _to_list(r["embedding"]),
-        }
-        for r in rows
-    ]
 
 
 async def get_seed_tracks(user_id: str, limit: int) -> list[dict[str, Any]]:

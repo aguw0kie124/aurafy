@@ -191,22 +191,14 @@ export type ProposedPlaylist = {
 	trackUris: string[];
 };
 
-// Builder v2 (Phase B): describe box + preset + library anchors all coexist in one
-// request. mode drives whether the backend runs the LLM interpret step; every other
-// field is optional and applied regardless of mode.
+// The "describe a vibe" box: the backend runs the LLM interpret step on the
+// instruction, then retrieves + curates a proposed playlist.
 export type PlaylistPreviewInput = {
-	mode: 'params' | 'instruction';
+	mode: 'instruction';
 	instruction?: string;
-	name?: string;
 	length?: number;
-	mix?: number;
 	allowExplicit?: boolean;
-	genres?: string[];
-	avoidGenres?: string[];
-	seedArtistNames?: string[];
-	preset?: string;
-	seedTrackIds?: string[];
-	seedArtistIds?: string[];
+	name?: string;
 };
 
 export async function previewPlaylist(input: PlaylistPreviewInput) {
