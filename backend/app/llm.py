@@ -22,7 +22,7 @@ import json
 import os
 from typing import Any
 
-MODEL = "gemini-2.5-flash"  # 2.0-flash lost free-tier quota
+MODEL = os.getenv("GEMINI_MODEL", "gemini-3.6-flash")  # 2.5-flash got gated for new keys
 
 _client = None
 
