@@ -209,6 +209,41 @@ async def discovery_ideas(top_genres: list[str], top_artists: list[str]) -> dict
     return None
 
 
+# --- shelf naming (For You feed) --------------------------------------------
+
+DESCRIBE_SHELVES_INSTRUCTION = """You name music playlist shelves for one listener.
+
+You get a list of shelves, each with a key and a few example tracks. For each shelf,
+write a short, catchy title (2-4 words) capturing the vibe/genre of its tracks — like a
+Spotify section header ("Your ambient side", "Late-night hip hop", "Indie for the drive").
+Do NOT output the word "Playlist" or just repeat a track name.
+
+Return ONLY a JSON object mapping each shelf key EXACTLY as given to its title string."""
+
+
+async def describe_shelves(shelves: list[dict[str, Any]]) -> dict[str, str]:
+    """Name taste-mode shelves/playlists from a few representative tracks. Input:
+    ``[{"key": ..., "tracks": [{"title","artist"}, ...]}, ...]``. One JSON call for all
+    shelves; best-effort → ``{}`` (caller falls back to static names)."""
+    if not shelves:
+        return {}
+    lines = []
+    for s in shelves:
+        examples = "; ".join(
+            f'{t["title"]} — {t["artist"]}' for t in (s.get("tracks") or [])[:5]
+        )
+        lines.append(f'{s["key"]}: {examples or "(no examples)"}')
+    out = await _generate(DESCRIBE_SHELVES_INSTRUCTION, "Shelves:\n" + "\n".join(lines), temperature=0.7)
+    if not out:
+        return {}
+    named: dict[str, str] = {}
+    for s in shelves:
+        title = out.get(s["key"])
+        if isinstance(title, str) and title.strip():
+            named[s["key"]] = title.strip()
+    return named
+
+
 # --- curate (the RAG step) --------------------------------------------------
 
 CURATE_INSTRUCTION = """You are a music curator assembling ONE playlist.

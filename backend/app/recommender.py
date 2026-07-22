@@ -511,3 +511,179 @@ async def _infer_missing_genres(cands: list[dict[str, Any]]) -> None:
             extra = {g for n in c.get("artist_name_list") or [] for g in tagged.get(n, [])}
             if extra:
                 c["genres"] = sorted(extra)
+
+
+# --- For You feed (rows + curated playlists) --------------------------------
+
+ROW_LEN = 15            # tracks per recommendation row
+PLAYLIST_LEN = 25       # tracks per curated playlist
+MAX_LIKED_ROWS = 3      # "Because you liked X" rows
+MAX_CLUSTERS = 4        # taste-mode playlists
+NEAR_K = 40             # candidates pulled per ANN query before dedupe/cap
+
+
+def _dedupe_cap(cands: list[dict[str, Any]], n: int) -> list[dict[str, Any]]:
+    """Dedupe (id + title/artist), cap per primary artist, order for variety, take n."""
+    per_artist_cap = max(2, round(n / 5))
+    out: list[dict[str, Any]] = []
+    ids: set[str] = set()
+    songs: set[tuple[str, str]] = set()
+    counts: dict[str, int] = {}
+    for c in cands:
+        if len(out) >= n:
+            break
+        tid = c["spotify_track_id"]
+        song = (c["title"].strip().lower(), c["artist"].strip().lower())
+        if tid in ids or song in songs:
+            continue
+        primary = _primary_artist(c)
+        if counts.get(primary, 0) >= per_artist_cap:
+            continue
+        ids.add(tid)
+        songs.add(song)
+        counts[primary] = counts.get(primary, 0) + 1
+        out.append(c)
+    return _order_for_variety(out)
+
+
+def _library_clusters(lib: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """k-means over the user's library vectors → distinct taste modes. Each cluster:
+    ``{centroid, size, representative_tracks}`` (the members nearest the centroid, used
+    to name + seed a playlist). A small library collapses to a single centroid."""
+    if not lib:
+        return []
+    vecs = [t["embedding"] for t in lib]
+    n = len(lib)
+    if n < 15:
+        return [{
+            "centroid": _mean(vecs),
+            "size": n,
+            "representative_tracks": [{"title": t["title"], "artist": t["artist"]} for t in lib[:5]],
+        }]
+    from sklearn.cluster import KMeans
+
+    X = np.asarray(vecs, dtype=float)
+    k = min(5, max(2, n // 40))
+    labels = KMeans(n_clusters=k, n_init=10, random_state=0).fit_predict(X)
+    clusters: list[dict[str, Any]] = []
+    for ci in range(k):
+        idx = [i for i, lbl in enumerate(labels) if lbl == ci]
+        if not idx:
+            continue
+        centroid = X[idx].mean(axis=0)
+        nearest = sorted(idx, key=lambda i: float(np.linalg.norm(X[i] - centroid)))[:5]
+        clusters.append({
+            "centroid": centroid.tolist(),
+            "size": len(idx),
+            "representative_tracks": [
+                {"title": lib[i]["title"], "artist": lib[i]["artist"]} for i in nearest
+            ],
+        })
+    # Biggest taste modes first.
+    clusters.sort(key=lambda c: c["size"], reverse=True)
+    return clusters
+
+
+async def recommend(session: dict[str, Any]) -> dict[str, Any]:
+    """The For You feed: rows of individual new songs + curated taste-mode playlists.
+    One shared discovery pool (grounded LLM ideas → live Spotify search → embed) feeds
+    everything; rows/playlists are sliced by vector similarity, so the whole feed costs
+    ~2 Gemini calls (discovery + naming). Rebuilt each visit; degrades gracefully."""
+    user_id = session["user_id"]
+    allow_explicit = True
+
+    owned = await db.get_library_track_ids(user_id)
+    artist_rows = await db.get_artist_weights(user_id)
+    genre_rows = await db.get_genre_weights(user_id)
+    top_artists = [r["name"] for r in artist_rows[:15]]
+    top_genres = [r["genre"] for r in genre_rows[:12]]
+
+    # 1) DISCOVERY POOL — new songs from the user's taste (LLM ideas → live Spotify
+    #    search → persist + embed, so the finds also land in the catalog/flywheel).
+    ideas = await llm.discovery_ideas(top_genres, top_artists) if llm.is_configured() else None
+    disc_spec = {
+        "discovery_artists": (ideas["artists"][:10] if ideas else top_artists[:8]),
+        "discovery_tracks": (ideas["tracks"][:10] if ideas else []),
+        "allow_explicit": allow_explicit,
+    }
+    pool = await _live_discovery(session, disc_spec, owned)
+    await _persist_and_embed(pool)
+    await _enrich_genres(pool)
+    taste = await db.knn_taste_scores(user_id, [c["spotify_track_id"] for c in pool], 5)
+    for c in pool:
+        c["taste"] = taste.get(c["spotify_track_id"], 0.0)
+        c["kind"] = "discovery"
+
+    rows: list[dict[str, Any]] = []
+
+    # 2a) For You — the new songs closest to the user's taste.
+    for_you = _dedupe_cap(
+        sorted(pool, key=lambda c: (c["taste"], c.get("popularity") or 0), reverse=True), ROW_LEN
+    )
+    if len(for_you) >= 5:
+        rows.append({"key": "for_you", "caption": "For You", "tracks": [_output_track(c) for c in for_you]})
+
+    # 2b) Because you liked <track> — nearest non-owned catalog tracks to recent likes
+    #     (now includes the freshly-embedded discovery finds via the catalog).
+    seeds = await db.get_seed_tracks(user_id, MAX_LIKED_ROWS * 2)
+    liked_rows = 0
+    for seed in seeds:
+        if liked_rows >= MAX_LIKED_ROWS:
+            break
+        near = await db.vector_search_near_track(user_id, seed["spotify_track_id"], NEAR_K, allow_explicit)
+        near = _dedupe_cap([{**c, "kind": "discovery"} for c in near if c["spotify_track_id"] not in owned], ROW_LEN)
+        if len(near) >= 5:
+            rows.append({
+                "key": f"liked_{seed['spotify_track_id']}",
+                "caption": f"Because you liked {seed['title']}",
+                "tracks": [_output_track(c) for c in near],
+            })
+            liked_rows += 1
+
+    # 3) Curated playlists — one per taste mode (deterministic) + Fresh Finds.
+    playlists: list[dict[str, Any]] = []
+    to_name: list[dict[str, Any]] = []
+    clusters = _library_clusters(await db.get_user_library_vectors(user_id))
+    for i, cl in enumerate(clusters[:MAX_CLUSTERS]):
+        near = await db.vector_search_catalog(user_id, cl["centroid"], NEAR_K, allow_explicit)
+        tracks = _dedupe_cap([{**c, "kind": "discovery"} for c in near], PLAYLIST_LEN)
+        if len(tracks) >= 8:
+            key = f"cluster_{i}"
+            playlists.append(_playlist_shape(key, "Your taste, expanded", tracks))
+            to_name.append({"key": key, "tracks": cl["representative_tracks"]})
+
+    # Fresh Finds — the freshest picks (popular new tracks you don't own).
+    fresh = _dedupe_cap(
+        sorted(pool, key=lambda c: (c.get("popularity") or 0), reverse=True), PLAYLIST_LEN
+    )
+    if len(fresh) >= 8:
+        playlists.append(_playlist_shape("fresh_finds", "New music picked for you", fresh, name="Fresh Finds"))
+
+    # 4) Name the taste-mode playlists from their representative tracks (one LLM call).
+    if to_name and llm.is_configured():
+        try:
+            named = await llm.describe_shelves(to_name)
+        except Exception:
+            named = {}
+        for p in playlists:
+            if p["name"] is None:
+                p["name"] = named.get(p["key"])
+    for idx, p in enumerate(playlists):
+        if p["name"] is None:
+            p["name"] = f"Taste Mix {idx + 1}"
+
+    return {"rows": rows, "playlists": playlists}
+
+
+def _playlist_shape(
+    key: str, description: str, tracks: list[dict[str, Any]], name: str | None = None
+) -> dict[str, Any]:
+    out = [_output_track(c) for c in tracks]
+    return {
+        "key": key,
+        "name": name,
+        "description": description,
+        "coverUrl": out[0]["coverUrl"] if out else None,
+        "tracks": out,
+        "trackUris": [f"spotify:track:{t['spotifyTrackId']}" for t in out],
+    }

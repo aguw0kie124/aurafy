@@ -878,6 +878,14 @@ async def library_search(
     return await db.search_library(session["user_id"], q, max(1, min(limit, 20)))
 
 
+@app.get("/api/recommendations")
+async def recommendations(request: Request) -> dict[str, Any]:
+    """The For You feed: recommendation song rows + curated taste-mode playlists,
+    with new music sourced live from Spotify. Rebuilt on each request."""
+    session = await require_session(request)
+    return await recommender.recommend(session)
+
+
 @app.post("/api/playlist/create")
 async def create_playlist(request: Request, body: PlaylistCreateRequest) -> dict[str, Any]:
     """Create the proposed playlist in the user's Spotify account."""
