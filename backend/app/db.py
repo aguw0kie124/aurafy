@@ -545,6 +545,14 @@ async def vibe_scores(track_ids: list[str], query_vec: list[float]) -> dict[str,
     return {r["spotify_track_id"]: float(r["similarity"]) for r in rows}
 
 
+def _to_list(vec: Any) -> list[float]:
+    """Read a pgvector column value back to a plain list. The asyncpg codec returns a
+    ``pgvector.Vector`` (not directly iterable); numpy arrays and lists also pass through."""
+    if hasattr(vec, "to_list"):
+        return vec.to_list()
+    return list(vec)
+
+
 async def get_track_embeddings(track_ids: list[str]) -> dict[str, list[float]]:
     """Stored embedding vectors for the given track ids (used to build a seed
     centroid from anchor songs). Missing / unembedded ids are omitted."""
@@ -555,7 +563,7 @@ async def get_track_embeddings(track_ids: list[str]) -> dict[str, list[float]]:
         "where spotify_track_id = any($1::text[]) and embedding is not null",
         track_ids,
     )
-    return {r["spotify_track_id"]: list(r["embedding"]) for r in rows}
+    return {r["spotify_track_id"]: _to_list(r["embedding"]) for r in rows}
 
 
 async def get_artist_track_embeddings(artist_ids: list[str], limit: int) -> list[list[float]]:
@@ -574,7 +582,7 @@ async def get_artist_track_embeddings(artist_ids: list[str], limit: int) -> list
         """,
         artist_ids, limit,
     )
-    return [list(r["embedding"]) for r in rows]
+    return [_to_list(r["embedding"]) for r in rows]
 
 
 async def search_library(user_id: str, q: str, limit: int) -> dict[str, list[dict[str, Any]]]:
@@ -626,6 +634,106 @@ async def search_library(user_id: str, q: str, limit: int) -> dict[str, list[dic
             for r in artist_rows
         ],
     }
+
+
+async def get_user_library_vectors(user_id: str) -> list[dict[str, Any]]:
+    """The user's library tracks that have an embedding, with light metadata — for
+    taste-mode clustering and centroids. ``embedding`` is a python list of floats."""
+    rows = await pool.fetch(
+        f"""
+        with lib as ({_LIBRARY_IDS_SQL})
+        select t.spotify_track_id, t.title, t.artist, t.embedding
+        from lib join tracks t on t.spotify_track_id = lib.spotify_track_id
+        where t.embedding is not null
+        """,
+        user_id,
+    )
+    return [
+        {
+            "spotify_track_id": r["spotify_track_id"],
+            "title": r["title"],
+            "artist": r["artist"],
+            "embedding": _to_list(r["embedding"]),
+        }
+        for r in rows
+    ]
+
+
+async def get_seed_tracks(user_id: str, limit: int) -> list[dict[str, Any]]:
+    """Recent high-signal tracks with embeddings — seeds for the 'Because you liked X'
+    rows. Liked songs first (most recent), falling back to top tracks."""
+    rows = await pool.fetch(
+        """
+        select t.spotify_track_id, t.title, t.artist, t.image_url, t.embedding
+        from user_saved_tracks ust
+        join tracks t on t.spotify_track_id = ust.spotify_track_id
+        where ust.user_id = $1 and t.embedding is not null
+        order by ust.saved_at desc nulls last
+        limit $2
+        """,
+        user_id, limit,
+    )
+    if not rows:
+        rows = await pool.fetch(
+            """
+            select t.spotify_track_id, t.title, t.artist, t.image_url, t.embedding
+            from user_top_tracks utt
+            join tracks t on t.spotify_track_id = utt.spotify_track_id
+            where utt.user_id = $1 and t.embedding is not null
+            order by utt.rank asc
+            limit $2
+            """,
+            user_id, limit,
+        )
+    return [
+        {
+            "spotify_track_id": r["spotify_track_id"],
+            "title": r["title"],
+            "artist": r["artist"],
+            "image_url": r["image_url"],
+            "embedding": _to_list(r["embedding"]),
+        }
+        for r in rows
+    ]
+
+
+async def vector_search_near_track(
+    user_id: str, seed_track_id: str, k: int, allow_explicit: bool
+) -> list[dict[str, Any]]:
+    """Catalog tracks nearest a seed track's *stored* embedding (cosine), excluding the
+    seed and anything the user owns. Same row shape as ``vector_search_catalog``."""
+    rows = await pool.fetch(
+        f"""
+        with lib as ({_LIBRARY_IDS_SQL}),
+             seed as (select embedding from tracks where spotify_track_id = $2)
+        select t.spotify_track_id, t.title, t.artist, t.album, t.image_url, t.external_url,
+               t.popularity, t.explicit,
+               1 - (t.embedding <=> (select embedding from seed)) as similarity
+        from tracks t
+        where t.embedding is not null
+          and (select embedding from seed) is not null
+          and t.spotify_track_id <> $2
+          and t.spotify_track_id not in (select spotify_track_id from lib)
+          and ($3 or t.explicit = false)
+        order by t.embedding <=> (select embedding from seed)
+        limit $4
+        """,
+        user_id, seed_track_id, allow_explicit, k,
+    )
+    return [
+        {
+            "spotify_track_id": r["spotify_track_id"],
+            "title": r["title"],
+            "artist": r["artist"],
+            "album": r["album"],
+            "image_url": r["image_url"],
+            "external_url": r["external_url"],
+            "popularity": r["popularity"] or 0,
+            "explicit": r["explicit"],
+            "similarity": float(r["similarity"]),
+        }
+        for r in rows
+    ]
 
 
 async def knn_taste_scores(user_id: str, track_ids: list[str], k: int) -> dict[str, float]:
