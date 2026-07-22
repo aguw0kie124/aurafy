@@ -136,6 +136,79 @@ async def interpret(instruction: str, top_genres: list[str], top_artists: list[s
     }
 
 
+# --- discovery ideas (find NEW artists from taste) --------------------------
+
+DISCOVERY_INSTRUCTION = """You are a music curator finding NEW music for one listener.
+
+You get their taste (top genres and top artists). Recommend music they most likely
+DON'T already know but would love: adjacent scenes, influences, collaborators, rising
+acts, deeper corners of their genres. Use web search when it helps (current releases,
+"artists like X", scene lists).
+
+Return ONLY a JSON object with exactly these fields:
+- artists: up to 12 artist names that fit their taste. NEVER include artists from the
+  listener's top list — the point is expansion, not repetition.
+- tracks: up to 15 objects {"title": "...", "artist": "..."} — specific song picks,
+  favoring artists outside the listener's top list.
+
+Only the JSON object."""
+
+
+async def discovery_ideas(top_genres: list[str], top_artists: list[str]) -> dict[str, Any] | None:
+    """Ask Gemini for artists/tracks the listener likely doesn't know yet — the taste
+    -> new-music step (Spotify's /recommendations is dead for dev-mode apps). Returns
+    ``{"artists": [...], "tracks": [{"title","artist"}, ...]}`` or None. Grounded call
+    first (Google Search can't combine with JSON mode, hence the lenient parse); plain
+    JSON call as fallback. Everything is resolved through live Spotify search later, so
+    a hallucinated name simply finds nothing — never a fake track."""
+    from google.genai import types
+
+    client = _get_client()
+    prompt = (
+        f"Listener's top genres: {', '.join(top_genres) or 'unknown'}\n"
+        f"Listener's top artists (do NOT recommend these): {', '.join(top_artists) or 'unknown'}\n\n"
+        "Recommend artists and songs they most likely DON'T know yet but would love."
+    )
+    attempts = [
+        types.GenerateContentConfig(
+            system_instruction=DISCOVERY_INSTRUCTION,
+            tools=[types.Tool(google_search=types.GoogleSearch())],
+            temperature=0.9,
+        ),
+        types.GenerateContentConfig(
+            system_instruction=DISCOVERY_INSTRUCTION,
+            response_mime_type="application/json",
+            temperature=0.9,
+        ),
+    ]
+    known = {a.lower() for a in top_artists}
+    for config in attempts:
+        try:
+            resp = await asyncio.to_thread(
+                client.models.generate_content, model=MODEL, contents=prompt, config=config
+            )
+        except Exception:
+            continue
+        ideas = _extract_json((getattr(resp, "text", None) or "").strip())
+        if not ideas:
+            continue
+        artists = [
+            a.strip() for a in (ideas.get("artists") or [])
+            if isinstance(a, str) and a.strip() and a.strip().lower() not in known
+        ]
+        tracks = [
+            {"title": t["title"].strip(), "artist": t["artist"].strip()}
+            for t in (ideas.get("tracks") or [])
+            if isinstance(t, dict)
+            and isinstance(t.get("title"), str) and t["title"].strip()
+            and isinstance(t.get("artist"), str) and t["artist"].strip()
+            and t["artist"].strip().lower() not in known
+        ]
+        if artists or tracks:
+            return {"artists": artists[:12], "tracks": tracks[:15]}
+    return None
+
+
 # --- curate (the RAG step) --------------------------------------------------
 
 CURATE_INSTRUCTION = """You are a music curator assembling ONE playlist.

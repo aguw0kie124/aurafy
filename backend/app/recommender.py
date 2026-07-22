@@ -331,14 +331,23 @@ async def build(session: dict[str, Any], body: Any) -> dict[str, Any]:
         seed_vecs += await db.get_artist_track_embeddings(seed_artist_ids, 60)
     seed_centroid = _mean(seed_vecs) if seed_vecs else None
 
-    # With no explicit signal at all (bare params build), still give the pipeline
-    # something to work with: default the vibe to the user's top genres, and seed
-    # discovery from their top artists (deeper cuts), so the knobs aren't inert for
-    # a solo user whose catalog is basically just their own library.
+    # A bare params build carries no vibe — default it to the user's top genres so
+    # the query vector still means something.
     if not spec["vibe"] and seed_centroid is None:
         spec["vibe"] = ", ".join(top_genres[:8])
-    if spec["mix"] > 0 and not spec["discovery_artists"]:
-        spec["discovery_artists"] = top_artists[:8]
+
+    # Discovery = NEW music, drawn from the user's taste. Instruction mode already
+    # gets fresh names from `interpret`; for params/preset builds ask the LLM for
+    # artists/tracks the listener likely DOESN'T know yet (the whole point is finding
+    # new music, not resurfacing their own). Fall back to their top artists' deeper
+    # cuts only if the LLM is unavailable, so discovery is never empty.
+    if spec["mix"] > 0 and not spec["discovery_artists"] and not spec["discovery_tracks"]:
+        ideas = await llm.discovery_ideas(top_genres, top_artists) if llm.is_configured() else None
+        if ideas:
+            spec["discovery_artists"] = ideas["artists"][:8]
+            spec["discovery_tracks"] = ideas["tracks"][:10]
+        else:
+            spec["discovery_artists"] = top_artists[:8]
 
     allow_explicit = spec["allow_explicit"]
     avoid = set(spec["avoid_genres"])
