@@ -217,30 +217,6 @@ export async function previewPlaylist(input: PlaylistPreviewInput) {
 	});
 }
 
-export type LibrarySearchTrack = {
-	spotifyTrackId: string;
-	title: string;
-	artist: string;
-	coverUrl: string | null;
-};
-
-export type LibrarySearchArtist = {
-	spotifyArtistId: string;
-	name: string;
-	imageUrl: string | null;
-};
-
-export type LibrarySearchResult = {
-	tracks: LibrarySearchTrack[];
-	artists: LibrarySearchArtist[];
-};
-
-// Search the user's own library for the builder's anchor picker.
-export async function searchLibrary(q: string, limit = 8) {
-	const query = `q=${encodeURIComponent(q)}&limit=${limit}`;
-	return fetchJson<LibrarySearchResult>(`/api/library/search?${query}`);
-}
-
 // --- For You recommendations feed ---
 
 export type RecRow = {

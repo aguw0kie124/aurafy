@@ -61,9 +61,6 @@ create table if not exists artists (
     updated_at timestamptz not null default now()
 );
 
--- Gemini text-embedding-004 vector (768-dim) of the artist's text doc; NULL until embedded.
-alter table artists add column if not exists embedding vector(768);
-
 create table if not exists artist_genres (
     spotify_artist_id text not null references artists(spotify_artist_id) on delete cascade,
     genre text not null,

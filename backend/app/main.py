@@ -872,16 +872,6 @@ async def preview_playlist(request: Request, body: PlaylistPreviewRequest) -> di
     return await recommender.build(session, body)
 
 
-@app.get("/api/library/search")
-async def library_search(
-    request: Request, q: str = Query(""), limit: int = Query(8)
-) -> dict[str, Any]:
-    """Search the user's own library (tracks + artists) for the builder's anchor
-    picker — how you pick 'build around this' seeds instead of typing names."""
-    session = await require_session(request)
-    return await db.search_library(session["user_id"], q, max(1, min(limit, 20)))
-
-
 @app.get("/api/recommendations")
 async def recommendations(request: Request, refresh: bool = Query(False)) -> dict[str, Any]:
     """The For You feed: recommendation song rows + curated taste-mode playlists,

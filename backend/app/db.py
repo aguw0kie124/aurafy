@@ -294,47 +294,6 @@ async def sync_library(user_id: str, payload: dict[str, Any]) -> None:
                 )
 
 
-# --- AI genre backfill (Spotify no longer exposes artist genres) ---
-
-
-async def get_artists_missing_genres(limit: int = 300) -> list[dict[str, str]]:
-    """Artists with no genre rows yet, most recently touched first."""
-    rows = await pool.fetch(
-        """
-        select a.spotify_artist_id, a.name
-        from artists a
-        where not exists (
-            select 1 from artist_genres ag where ag.spotify_artist_id = a.spotify_artist_id
-        )
-        order by a.updated_at desc
-        limit $1
-        """,
-        limit,
-    )
-    return [{"spotify_artist_id": r["spotify_artist_id"], "name": r["name"]} for r in rows]
-
-
-async def insert_artist_genres(genre_rows: list[tuple[str, str]]) -> None:
-    """(spotify_artist_id, genre) pairs; existing pairs are left untouched."""
-    if genre_rows:
-        await pool.executemany(
-            "insert into artist_genres (spotify_artist_id, genre) values ($1, $2) "
-            "on conflict do nothing",
-            genre_rows,
-        )
-
-
-async def get_genres_for_artist_ids(artist_ids: list[str]) -> dict[str, list[str]]:
-    rows = await pool.fetch(
-        "select spotify_artist_id, genre from artist_genres where spotify_artist_id = any($1::text[])",
-        artist_ids,
-    )
-    genres: dict[str, list[str]] = {}
-    for r in rows:
-        genres.setdefault(r["spotify_artist_id"], []).append(r["genre"])
-    return genres
-
-
 async def get_track_artist_genres(track_ids: list[str]) -> dict[str, dict[str, Any]]:
     """For each track id, its artist ids (billing order), artist names, and the
     union of those artists' genres. Enriches candidates that arrive thin — ANN
@@ -395,38 +354,11 @@ async def get_tracks_missing_embeddings(limit: int) -> list[dict[str, Any]]:
     ]
 
 
-async def get_artists_missing_embeddings(limit: int) -> list[dict[str, Any]]:
-    """Artists without a vector yet, with their genres for the text doc."""
-    rows = await pool.fetch(
-        """
-        select a.spotify_artist_id, a.name,
-               coalesce((select array_agg(ag.genre) from artist_genres ag
-                         where ag.spotify_artist_id = a.spotify_artist_id), '{}') as genres
-        from artists a
-        where a.embedding is null
-        limit $1
-        """,
-        limit,
-    )
-    return [
-        {"spotify_artist_id": r["spotify_artist_id"], "name": r["name"], "genres": list(r["genres"])}
-        for r in rows
-    ]
-
-
 async def store_track_embeddings(pairs: list[tuple[str, list[float]]]) -> None:
     """(spotify_track_id, vector) — requires the pgvector codec (see _init_connection)."""
     if pairs:
         await pool.executemany(
             "update tracks set embedding = $2, updated_at = now() where spotify_track_id = $1",
-            pairs,
-        )
-
-
-async def store_artist_embeddings(pairs: list[tuple[str, list[float]]]) -> None:
-    if pairs:
-        await pool.executemany(
-            "update artists set embedding = $2, updated_at = now() where spotify_artist_id = $1",
             pairs,
         )
 
@@ -583,57 +515,6 @@ async def get_artist_track_embeddings(artist_ids: list[str], limit: int) -> list
         artist_ids, limit,
     )
     return [_to_list(r["embedding"]) for r in rows]
-
-
-async def search_library(user_id: str, q: str, limit: int) -> dict[str, list[dict[str, Any]]]:
-    """Anchor-picker search: the user's own tracks + artists whose title/name match
-    ``q`` (ILIKE). Returns {"tracks": [...], "artists": [...]} for the builder."""
-    if not q.strip():
-        return {"tracks": [], "artists": []}
-    like = f"%{q.strip()}%"
-    track_rows = await pool.fetch(
-        f"""
-        with lib as ({_LIBRARY_IDS_SQL})
-        select t.spotify_track_id, t.title, t.artist, t.image_url
-        from lib join tracks t on t.spotify_track_id = lib.spotify_track_id
-        where t.title ilike $2 or t.artist ilike $2
-        order by t.popularity desc nulls last
-        limit $3
-        """,
-        user_id, like, limit,
-    )
-    artist_rows = await pool.fetch(
-        f"""
-        with lib as ({_LIBRARY_IDS_SQL})
-        select distinct a.spotify_artist_id, a.name, a.image_url
-        from lib
-        join track_artists ta on ta.spotify_track_id = lib.spotify_track_id
-        join artists a on a.spotify_artist_id = ta.spotify_artist_id
-        where a.name ilike $2
-        order by a.name
-        limit $3
-        """,
-        user_id, like, limit,
-    )
-    return {
-        "tracks": [
-            {
-                "spotifyTrackId": r["spotify_track_id"],
-                "title": r["title"],
-                "artist": r["artist"],
-                "coverUrl": r["image_url"],
-            }
-            for r in track_rows
-        ],
-        "artists": [
-            {
-                "spotifyArtistId": r["spotify_artist_id"],
-                "name": r["name"],
-                "imageUrl": r["image_url"],
-            }
-            for r in artist_rows
-        ],
-    }
 
 
 async def get_user_library_vectors(user_id: str) -> list[dict[str, Any]]:
@@ -895,28 +776,5 @@ async def get_library_candidates(user_id: str, allow_explicit: bool) -> list[dic
         where ($2 or t.explicit = false)
         """,
         user_id, allow_explicit,
-    )
-    return _candidate_rows_to_dicts(rows)
-
-
-async def get_cross_user_candidates(
-    user_id: str, allow_explicit: bool, limit: int
-) -> list[dict[str, Any]]:
-    """Tracks other users saved that this user doesn't have (collaborative signal).
-    Empty until several users exist; included so discovery strengthens with scale."""
-    rows = await pool.fetch(
-        f"""
-        with lib as ({_LIBRARY_IDS_SQL})
-        select distinct t.spotify_track_id, t.title, t.artist, t.album, t.image_url, t.external_url,
-               t.popularity, t.explicit,
-               {_ARTIST_IDS_AND_GENRES_SQL}
-        from user_saved_tracks ust
-        join tracks t on t.spotify_track_id = ust.spotify_track_id
-        where ust.user_id <> $1
-          and ust.spotify_track_id not in (select spotify_track_id from lib)
-          and ($2 or t.explicit = false)
-        limit $3
-        """,
-        user_id, allow_explicit, limit,
     )
     return _candidate_rows_to_dicts(rows)
