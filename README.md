@@ -2,8 +2,8 @@
 
 If you're always getting bored of your playlists, this is for you.
 
-Aurafy gives you a **For You** feed of new songs picked to match your Spotify
-taste, plus a **Recap** of your recent listening. Anything it surfaces can be
+Aurafy gives you a For You feed of new songs picked to match your Spotify
+taste, plus an AI playlist builder. Anything it surfaces can be
 saved straight to your Spotify account as a playlist.
 
 ## How it works
@@ -43,6 +43,12 @@ Gemini key, both fall back to a deterministic taste-ranked sort.
   hallucinated in.
 - **Clustering:** scikit-learn **k-means** over your library vectors surfaces distinct
   "taste modes," each seeded into its own playlist.
+
+## Deploy
+
+The project deploys as a single Docker image (see [`Dockerfile`](Dockerfile) and
+[`render.yaml`](render.yaml)) to Render, with FastAPI serving both the API and
+the built frontend from one origin.
 
 ## Run it locally
 
@@ -84,9 +90,3 @@ and a Spotify developer app. A Gemini key is optional.
    ```
 
 6. **Open** [http://127.0.0.1:5173](http://127.0.0.1:5173) and sign in with Spotify.
-
-## Deploy
-
-The project deploys as a single Docker image (see [`Dockerfile`](Dockerfile) and
-[`render.yaml`](render.yaml)) to Render, with FastAPI serving both the API and
-the built frontend from one origin.
