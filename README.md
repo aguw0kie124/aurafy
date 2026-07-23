@@ -8,26 +8,19 @@ saved straight to your Spotify account as a playlist.
 
 ## How it works
 
-Spotify no longer exposes audio features to new apps, so Aurafy can't compare
-songs by sound. Instead it compares them by text. Each track's title, artist,
-album, and genres are embedded into a 768-dim vector with Gemini and stored in
-Postgres using `pgvector`.
+Spotify no longer exposes audio features to new apps, so Aurafy compares tracks
+by *text* instead of sound. Each track's title, artist, album, and genres are
+embedded into a 768-dim vector (Gemini) and stored in Postgres with `pgvector`,
+so semantically similar music sits nearby.
 
-For the feed, your top artists and genres seed a discovery pool. Gemini
-suggests artist and track names, live Spotify search resolves those into real
-tracks, and new tracks get persisted and embedded, growing a shared catalog
-over time. Candidates are then scored with a kNN taste-fit lookup against your
-library's embeddings, blended with vibe similarity and popularity, and sliced
-into feed rows and playlists.
-
-The natural-language playlist builder runs the same pieces as a RAG pipeline.
-It interprets the request, retrieves candidates with a pgvector ANN search and
-a kNN rerank, and has Gemini curate and order the final list from that
-retrieved set only. Returned track ids are validated against what was
-retrieved, so the model can't hallucinate a track into the playlist.
-
-Gemini is optional throughout. Without a key, both the feed and builder fall
-back to a deterministic taste-ranked sort instead of LLM curation.
+The **feed** and the natural-language **playlist builder** run the same
+retrieval-augmented pipeline: interpret the request → retrieve candidates
+(pgvector ANN over the catalog + live Spotify search of Gemini-suggested names,
+which get persisted and embedded into a growing shared catalog) → rerank by
+taste-fit (kNN), vibe similarity, and popularity → have Gemini curate and order
+the final list *from the retrieved set only*. Returned track ids are validated
+against what was retrieved, so the model can't hallucinate a track in. Without a
+Gemini key, both fall back to a deterministic taste-ranked sort.
 
 ## Tech stack
 
@@ -37,7 +30,19 @@ back to a deterministic taste-ranked sort instead of LLM curation.
   searching embeddings
 - **Auth:** Spotify OAuth, with a server-side session behind an HTTP-only cookie;
   Spotify tokens are encrypted at rest
-- **AI:** Google Gemini for both embeddings and the natural-language layer
+- **Embeddings:** Google Gemini `gemini-embedding-001` (768-dim) over each track's
+  text metadata; vectors live in `pgvector`, indexed with **HNSW** (`vector_cosine_ops`)
+  for approximate-nearest-neighbor search. A throttled background job backfills
+  embeddings under the free-tier rate cap.
+- **Retrieval (RAG):** pgvector HNSW ANN pulls candidates near the query "vibe"
+  vector; a **kNN** taste-fit score (mean cosine similarity to your nearest library
+  tracks) blends with vibe similarity and popularity to rerank the pool.
+- **Generation:** Gemini `gemini-3.6-flash` (JSON mode) interprets requests, suggests
+  new artists/tracks (grounded with Google Search), and curates/orders the playlist
+  from retrieved candidates **only** — returned ids are validated, so nothing is
+  hallucinated in.
+- **Clustering:** scikit-learn **k-means** over your library vectors surfaces distinct
+  "taste modes," each seeded into its own playlist.
 
 ## Run it locally
 
