@@ -479,13 +479,14 @@ async def _infer_missing_genres(cands: list[dict[str, Any]]) -> None:
                 c["genres"] = sorted(extra)
 
 
-# --- For You feed (rows + curated playlists) --------------------------------
+# --- For You feed (one saveable playlist per taste mode) ---------------------
 
-ROW_LEN = 15            # tracks per recommendation row
 PLAYLIST_LEN = 25       # tracks per curated playlist
-MAX_LIKED_ROWS = 3      # "Because you liked X" rows
-MAX_CLUSTERS = 4        # taste-mode playlists
-NEAR_K = 40             # candidates pulled per ANN query before dedupe/cap
+MAX_CLUSTERS = 6        # taste-mode playlists
+# Each playlist takes PLAYLIST_LEN off a shared pool (tracks are deduped across the
+# whole feed, not just within a playlist), so pull deep enough that the last cluster
+# still clears the keep threshold.
+NEAR_K = 80             # candidates pulled per ANN query before dedupe/cap
 
 # The feed is ~20s to build (live discovery + Spotify search), so cache it per user
 # and serve instantly on revisits; the Refresh button (force=True) rebuilds on demand.
@@ -498,12 +499,22 @@ def invalidate_feed(user_id: str) -> None:
     _feed_cache.pop(user_id, None)
 
 
-def _dedupe_cap(cands: list[dict[str, Any]], n: int) -> list[dict[str, Any]]:
-    """Dedupe (id + title/artist), cap per primary artist, order for variety, take n."""
+def _dedupe_cap(
+    cands: list[dict[str, Any]],
+    n: int,
+    seen_ids: set[str] | None = None,
+    seen_songs: set[tuple[str, str]] | None = None,
+) -> list[dict[str, Any]]:
+    """Dedupe (id + title/artist), cap per primary artist, order for variety, take n.
+
+    Pass ``seen_ids``/``seen_songs`` to share dedupe state across calls — the feed
+    threads one pair through every playlist so the same track can't surface in two
+    rows. The per-artist cap stays per-call: capping an artist within a row is the
+    point, capping them across the whole feed is not."""
     per_artist_cap = max(2, round(n / 5))
     out: list[dict[str, Any]] = []
-    ids: set[str] = set()
-    songs: set[tuple[str, str]] = set()
+    ids = seen_ids if seen_ids is not None else set()
+    songs = seen_songs if seen_songs is not None else set()
     counts: dict[str, int] = {}
     for c in cands:
         if len(out) >= n:
@@ -520,6 +531,35 @@ def _dedupe_cap(cands: list[dict[str, Any]], n: int) -> list[dict[str, Any]]:
         counts[primary] = counts.get(primary, 0) + 1
         out.append(c)
     return _order_for_variety(out)
+
+
+def _nearest_by_cosine(
+    X: "np.ndarray", idx: list[int], centroid: "np.ndarray", k: int
+) -> list[int]:
+    """The k members of ``idx`` closest to ``centroid`` by *cosine* distance — the same
+    geometry pgvector uses for the ANN query these centroids seed."""
+    members = X[idx]
+    norms = np.linalg.norm(members, axis=1)
+    sims = (members @ centroid) / np.where(norms == 0, 1.0, norms)
+    return [idx[i] for i in np.argsort(-sims)[:k]]
+
+
+def _cluster_name(reps: list[dict[str, str]], fallback: str) -> str:
+    """Name a taste mode after its two most representative distinct artists.
+
+    ``artist`` is every credited name comma-joined ("Chief Keef, Tray Savage, Tadoe"),
+    so take each rep's *lead* artist — joining the raw strings reads as a credits list,
+    not a name."""
+    artists: list[str] = []
+    seen: set[str] = set()
+    for rep in reps:
+        lead = (rep.get("artist") or "").split(",")[0].strip()
+        if lead and lead.lower() not in seen:
+            seen.add(lead.lower())
+            artists.append(lead)
+        if len(artists) == 2:
+            break
+    return f"{', '.join(artists)} & similar" if artists else fallback
 
 
 def _library_clusters(lib: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -539,7 +579,7 @@ def _library_clusters(lib: list[dict[str, Any]]) -> list[dict[str, Any]]:
     from sklearn.cluster import KMeans
 
     X = np.asarray(vecs, dtype=float)
-    k = min(5, max(2, n // 40))
+    k = min(7, max(2, n // 25))
     labels = KMeans(n_clusters=k, n_init=10, random_state=0).fit_predict(X)
     clusters: list[dict[str, Any]] = []
     for ci in range(k):
@@ -547,7 +587,7 @@ def _library_clusters(lib: list[dict[str, Any]]) -> list[dict[str, Any]]:
         if not idx:
             continue
         centroid = X[idx].mean(axis=0)
-        nearest = sorted(idx, key=lambda i: float(np.linalg.norm(X[i] - centroid)))[:5]
+        nearest = _nearest_by_cosine(X, idx, centroid, 5)
         clusters.append({
             "centroid": centroid.tolist(),
             "size": len(idx),
@@ -561,10 +601,11 @@ def _library_clusters(lib: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 async def recommend(session: dict[str, Any], force: bool = False) -> dict[str, Any]:
-    """The For You feed: rows of individual new songs + curated taste-mode playlists.
-    One shared discovery pool (grounded LLM ideas → live Spotify search → embed) feeds
-    everything; rows/playlists are sliced by vector similarity. Cached per user for
-    FEED_TTL; ``force=True`` (the Refresh button) rebuilds. Degrades gracefully."""
+    """The For You feed: one curated playlist per k-means taste mode, plus Fresh Finds.
+    A shared discovery pool (grounded LLM ideas → live Spotify search → embed) feeds
+    everything; each playlist is an ANN slice around its cluster centroid. Cached per
+    user for FEED_TTL; ``force=True`` (the Refresh button) rebuilds. Degrades
+    gracefully."""
     user_id = session["user_id"]
     if not force:
         cached = _feed_cache.get(user_id)
@@ -592,45 +633,34 @@ async def recommend(session: dict[str, Any], force: bool = False) -> dict[str, A
     for c in pool:
         c["kind"] = "discovery"
 
-    rows: list[dict[str, Any]] = []
-
-    # 2) Because you liked <track> — nearest non-owned catalog tracks to recent likes
-    #    (now includes the freshly-embedded discovery finds via the catalog).
-    seeds = await db.get_seed_tracks(user_id, MAX_LIKED_ROWS * 2)
-    liked_rows = 0
-    for seed in seeds:
-        if liked_rows >= MAX_LIKED_ROWS:
-            break
-        near = await db.vector_search_near_track(user_id, seed["spotify_track_id"], NEAR_K, allow_explicit)
-        near = _dedupe_cap([{**c, "kind": "discovery"} for c in near if c["spotify_track_id"] not in owned], ROW_LEN)
-        if len(near) >= 5:
-            rows.append({
-                "key": f"liked_{seed['spotify_track_id']}",
-                "caption": f"Because you liked {seed['title']}",
-                "tracks": [_output_track(c) for c in near],
-            })
-            liked_rows += 1
-
-    # 3) Curated playlists — one per taste mode (deterministic) + Fresh Finds. Named
-    #    statically from each mode's most representative artist (no LLM naming call).
+    # 2) Curated playlists — one per taste mode (deterministic) + Fresh Finds. Named
+    #    statically from each mode's most representative artists (no LLM naming call).
+    #    Nearby centroids pull overlapping candidates, so dedupe state is shared across
+    #    every playlist: no track appears twice anywhere in the feed.
     playlists: list[dict[str, Any]] = []
+    seen_ids: set[str] = set()
+    seen_songs: set[tuple[str, str]] = set()
     clusters = _library_clusters(await db.get_user_library_vectors(user_id))
     for i, cl in enumerate(clusters[:MAX_CLUSTERS]):
         near = await db.vector_search_catalog(user_id, cl["centroid"], NEAR_K, allow_explicit)
-        tracks = _dedupe_cap([{**c, "kind": "discovery"} for c in near], PLAYLIST_LEN)
+        tracks = _dedupe_cap(
+            [{**c, "kind": "discovery"} for c in near], PLAYLIST_LEN, seen_ids, seen_songs
+        )
         if len(tracks) >= 8:
-            reps = cl["representative_tracks"]
-            name = f"{reps[0]['artist']} & similar" if reps else f"Taste Mix {i + 1}"
+            name = _cluster_name(cl["representative_tracks"], f"Taste Mix {i + 1}")
             playlists.append(_playlist_shape(f"cluster_{i}", "A slice of your taste", tracks, name=name))
 
     # Fresh Finds — the freshest picks (popular new tracks you don't own).
     fresh = _dedupe_cap(
-        sorted(pool, key=lambda c: (c.get("popularity") or 0), reverse=True), PLAYLIST_LEN
+        sorted(pool, key=lambda c: (c.get("popularity") or 0), reverse=True),
+        PLAYLIST_LEN,
+        seen_ids,
+        seen_songs,
     )
     if len(fresh) >= 8:
         playlists.append(_playlist_shape("fresh_finds", "New music picked for you", fresh, name="Fresh Finds"))
 
-    result = {"rows": rows, "playlists": playlists}
+    result = {"playlists": playlists}
     _feed_cache[user_id] = {"feed": result, "at": time.monotonic()}
     return result
 

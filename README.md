@@ -42,7 +42,8 @@ Gemini key, both fall back to a deterministic taste-ranked sort.
   from retrieved candidates **only** — returned ids are validated, so nothing is
   hallucinated in.
 - **Clustering:** scikit-learn **k-means** over your library vectors surfaces distinct
-  "taste modes," each seeded into its own playlist.
+  "taste modes." Each mode is one row of the For You feed — its centroid seeds the ANN
+  query that fills the row — and each row saves to Spotify as a playlist in one click.
 
 ## Deploy
 
