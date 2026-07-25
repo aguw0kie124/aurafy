@@ -864,9 +864,9 @@ async def preview_playlist(request: Request, body: PlaylistPreviewRequest) -> di
 
 @app.get("/api/recommendations")
 async def recommendations(request: Request, refresh: bool = Query(False)) -> dict[str, Any]:
-    """The For You feed: recommendation song rows + curated taste-mode playlists,
-    with new music sourced live from Spotify. Cached per user; ``?refresh=1`` (the
-    Refresh button) rebuilds it."""
+    """The For You feed: one curated playlist per taste mode, with new music sourced
+    live from Spotify. Cached per user; ``?refresh=1`` (the Refresh button) rebuilds
+    it."""
     session = await require_session(request)
     return await recommender.recommend(session, force=refresh)
 

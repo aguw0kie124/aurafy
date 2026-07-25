@@ -479,11 +479,9 @@ async def _infer_missing_genres(cands: list[dict[str, Any]]) -> None:
                 c["genres"] = sorted(extra)
 
 
-# --- For You feed (rows + curated playlists) --------------------------------
+# --- For You feed (one saveable playlist per taste mode) ---------------------
 
-ROW_LEN = 15            # tracks per recommendation row
 PLAYLIST_LEN = 25       # tracks per curated playlist
-MAX_LIKED_ROWS = 3      # "Because you liked X" rows
 MAX_CLUSTERS = 6        # taste-mode playlists
 # Each playlist takes PLAYLIST_LEN off a shared pool (tracks are deduped across the
 # whole feed, not just within a playlist), so pull deep enough that the last cluster
@@ -599,10 +597,11 @@ def _library_clusters(lib: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 async def recommend(session: dict[str, Any], force: bool = False) -> dict[str, Any]:
-    """The For You feed: rows of individual new songs + curated taste-mode playlists.
-    One shared discovery pool (grounded LLM ideas → live Spotify search → embed) feeds
-    everything; rows/playlists are sliced by vector similarity. Cached per user for
-    FEED_TTL; ``force=True`` (the Refresh button) rebuilds. Degrades gracefully."""
+    """The For You feed: one curated playlist per k-means taste mode, plus Fresh Finds.
+    A shared discovery pool (grounded LLM ideas → live Spotify search → embed) feeds
+    everything; each playlist is an ANN slice around its cluster centroid. Cached per
+    user for FEED_TTL; ``force=True`` (the Refresh button) rebuilds. Degrades
+    gracefully."""
     user_id = session["user_id"]
     if not force:
         cached = _feed_cache.get(user_id)
@@ -630,26 +629,7 @@ async def recommend(session: dict[str, Any], force: bool = False) -> dict[str, A
     for c in pool:
         c["kind"] = "discovery"
 
-    rows: list[dict[str, Any]] = []
-
-    # 2) Because you liked <track> — nearest non-owned catalog tracks to recent likes
-    #    (now includes the freshly-embedded discovery finds via the catalog).
-    seeds = await db.get_seed_tracks(user_id, MAX_LIKED_ROWS * 2)
-    liked_rows = 0
-    for seed in seeds:
-        if liked_rows >= MAX_LIKED_ROWS:
-            break
-        near = await db.vector_search_near_track(user_id, seed["spotify_track_id"], NEAR_K, allow_explicit)
-        near = _dedupe_cap([{**c, "kind": "discovery"} for c in near if c["spotify_track_id"] not in owned], ROW_LEN)
-        if len(near) >= 5:
-            rows.append({
-                "key": f"liked_{seed['spotify_track_id']}",
-                "caption": f"Because you liked {seed['title']}",
-                "tracks": [_output_track(c) for c in near],
-            })
-            liked_rows += 1
-
-    # 3) Curated playlists — one per taste mode (deterministic) + Fresh Finds. Named
+    # 2) Curated playlists — one per taste mode (deterministic) + Fresh Finds. Named
     #    statically from each mode's most representative artists (no LLM naming call).
     #    Nearby centroids pull overlapping candidates, so dedupe state is shared across
     #    every playlist: no track appears twice anywhere in the feed.
@@ -676,7 +656,7 @@ async def recommend(session: dict[str, Any], force: bool = False) -> dict[str, A
     if len(fresh) >= 8:
         playlists.append(_playlist_shape("fresh_finds", "New music picked for you", fresh, name="Fresh Finds"))
 
-    result = {"rows": rows, "playlists": playlists}
+    result = {"playlists": playlists}
     _feed_cache[user_id] = {"feed": result, "at": time.monotonic()}
     return result
 

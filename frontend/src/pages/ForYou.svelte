@@ -219,39 +219,7 @@
 			</section>
 		{/each}
 
-		{#each feed.rows as row (row.key)}
-			<section class="shelf">
-				<h2>{row.caption}</h2>
-				<div class="rail">
-					{#each row.tracks as track, index (track.spotifyTrackId ?? index)}
-						<article class="song">
-							<MediaThumb
-								kind="cover"
-								src={track.coverUrl}
-								alt={`${track.album} artwork`}
-								size="large"
-								label={track.title}
-							/>
-							<strong>{track.title}</strong>
-							<small>{track.artist}</small>
-							{#if track.externalUrl}
-								<a
-									class="open"
-									href={track.externalUrl}
-									target="_blank"
-									rel="noreferrer noopener"
-									aria-label={`Open ${track.title} in Spotify`}
-								>
-									<ExternalLink size={16} strokeWidth={2.2} />
-								</a>
-							{/if}
-						</article>
-					{/each}
-				</div>
-			</section>
-		{/each}
-
-		{#if !feed.rows.length && !feed.playlists.length}
+		{#if !feed.playlists.length}
 			<div class="notice">
 				<p>Sync your Spotify library to get recommendations.</p>
 			</div>
