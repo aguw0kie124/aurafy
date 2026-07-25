@@ -484,8 +484,11 @@ async def _infer_missing_genres(cands: list[dict[str, Any]]) -> None:
 ROW_LEN = 15            # tracks per recommendation row
 PLAYLIST_LEN = 25       # tracks per curated playlist
 MAX_LIKED_ROWS = 3      # "Because you liked X" rows
-MAX_CLUSTERS = 4        # taste-mode playlists
-NEAR_K = 40             # candidates pulled per ANN query before dedupe/cap
+MAX_CLUSTERS = 6        # taste-mode playlists
+# Each playlist takes PLAYLIST_LEN off a shared pool (tracks are deduped across the
+# whole feed, not just within a playlist), so pull deep enough that the last cluster
+# still clears the keep threshold.
+NEAR_K = 80             # candidates pulled per ANN query before dedupe/cap
 
 # The feed is ~20s to build (live discovery + Spotify search), so cache it per user
 # and serve instantly on revisits; the Refresh button (force=True) rebuilds on demand.
@@ -498,12 +501,22 @@ def invalidate_feed(user_id: str) -> None:
     _feed_cache.pop(user_id, None)
 
 
-def _dedupe_cap(cands: list[dict[str, Any]], n: int) -> list[dict[str, Any]]:
-    """Dedupe (id + title/artist), cap per primary artist, order for variety, take n."""
+def _dedupe_cap(
+    cands: list[dict[str, Any]],
+    n: int,
+    seen_ids: set[str] | None = None,
+    seen_songs: set[tuple[str, str]] | None = None,
+) -> list[dict[str, Any]]:
+    """Dedupe (id + title/artist), cap per primary artist, order for variety, take n.
+
+    Pass ``seen_ids``/``seen_songs`` to share dedupe state across calls — the feed
+    threads one pair through every playlist so the same track can't surface in two
+    rows. The per-artist cap stays per-call: capping an artist within a row is the
+    point, capping them across the whole feed is not."""
     per_artist_cap = max(2, round(n / 5))
     out: list[dict[str, Any]] = []
-    ids: set[str] = set()
-    songs: set[tuple[str, str]] = set()
+    ids = seen_ids if seen_ids is not None else set()
+    songs = seen_songs if seen_songs is not None else set()
     counts: dict[str, int] = {}
     for c in cands:
         if len(out) >= n:
@@ -520,6 +533,31 @@ def _dedupe_cap(cands: list[dict[str, Any]], n: int) -> list[dict[str, Any]]:
         counts[primary] = counts.get(primary, 0) + 1
         out.append(c)
     return _order_for_variety(out)
+
+
+def _nearest_by_cosine(
+    X: "np.ndarray", idx: list[int], centroid: "np.ndarray", k: int
+) -> list[int]:
+    """The k members of ``idx`` closest to ``centroid`` by *cosine* distance — the same
+    geometry pgvector uses for the ANN query these centroids seed."""
+    members = X[idx]
+    norms = np.linalg.norm(members, axis=1)
+    sims = (members @ centroid) / np.where(norms == 0, 1.0, norms)
+    return [idx[i] for i in np.argsort(-sims)[:k]]
+
+
+def _cluster_name(reps: list[dict[str, str]], fallback: str) -> str:
+    """Name a taste mode after its two most representative distinct artists."""
+    artists: list[str] = []
+    seen: set[str] = set()
+    for rep in reps:
+        artist = (rep.get("artist") or "").strip()
+        if artist and artist.lower() not in seen:
+            seen.add(artist.lower())
+            artists.append(artist)
+        if len(artists) == 2:
+            break
+    return f"{', '.join(artists)} & similar" if artists else fallback
 
 
 def _library_clusters(lib: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -539,7 +577,7 @@ def _library_clusters(lib: list[dict[str, Any]]) -> list[dict[str, Any]]:
     from sklearn.cluster import KMeans
 
     X = np.asarray(vecs, dtype=float)
-    k = min(5, max(2, n // 40))
+    k = min(7, max(2, n // 25))
     labels = KMeans(n_clusters=k, n_init=10, random_state=0).fit_predict(X)
     clusters: list[dict[str, Any]] = []
     for ci in range(k):
@@ -547,7 +585,7 @@ def _library_clusters(lib: list[dict[str, Any]]) -> list[dict[str, Any]]:
         if not idx:
             continue
         centroid = X[idx].mean(axis=0)
-        nearest = sorted(idx, key=lambda i: float(np.linalg.norm(X[i] - centroid)))[:5]
+        nearest = _nearest_by_cosine(X, idx, centroid, 5)
         clusters.append({
             "centroid": centroid.tolist(),
             "size": len(idx),
@@ -612,20 +650,28 @@ async def recommend(session: dict[str, Any], force: bool = False) -> dict[str, A
             liked_rows += 1
 
     # 3) Curated playlists — one per taste mode (deterministic) + Fresh Finds. Named
-    #    statically from each mode's most representative artist (no LLM naming call).
+    #    statically from each mode's most representative artists (no LLM naming call).
+    #    Nearby centroids pull overlapping candidates, so dedupe state is shared across
+    #    every playlist: no track appears twice anywhere in the feed.
     playlists: list[dict[str, Any]] = []
+    seen_ids: set[str] = set()
+    seen_songs: set[tuple[str, str]] = set()
     clusters = _library_clusters(await db.get_user_library_vectors(user_id))
     for i, cl in enumerate(clusters[:MAX_CLUSTERS]):
         near = await db.vector_search_catalog(user_id, cl["centroid"], NEAR_K, allow_explicit)
-        tracks = _dedupe_cap([{**c, "kind": "discovery"} for c in near], PLAYLIST_LEN)
+        tracks = _dedupe_cap(
+            [{**c, "kind": "discovery"} for c in near], PLAYLIST_LEN, seen_ids, seen_songs
+        )
         if len(tracks) >= 8:
-            reps = cl["representative_tracks"]
-            name = f"{reps[0]['artist']} & similar" if reps else f"Taste Mix {i + 1}"
+            name = _cluster_name(cl["representative_tracks"], f"Taste Mix {i + 1}")
             playlists.append(_playlist_shape(f"cluster_{i}", "A slice of your taste", tracks, name=name))
 
     # Fresh Finds — the freshest picks (popular new tracks you don't own).
     fresh = _dedupe_cap(
-        sorted(pool, key=lambda c: (c.get("popularity") or 0), reverse=True), PLAYLIST_LEN
+        sorted(pool, key=lambda c: (c.get("popularity") or 0), reverse=True),
+        PLAYLIST_LEN,
+        seen_ids,
+        seen_songs,
     )
     if len(fresh) >= 8:
         playlists.append(_playlist_shape("fresh_finds", "New music picked for you", fresh, name="Fresh Finds"))
