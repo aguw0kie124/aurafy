@@ -7,6 +7,7 @@
 	import {
 		recommendations,
 		previewPlaylist,
+		createPlaylist,
 		type Recommendations,
 		type RecPlaylist,
 		type ProposedPlaylist,
@@ -46,6 +47,9 @@
 		else feedStatus = 'loading';
 		try {
 			feed = await recommendations(refresh);
+			// Keys are stable across rebuilds but their tracks are not, so a stale
+			// "Open in Spotify" would point at the wrong playlist.
+			saveStates = {};
 			feedStatus = 'ready';
 		} catch {
 			if (!refresh) feedStatus = 'error';
@@ -71,11 +75,27 @@
 		}
 	}
 
-	function openPlaylist(playlist: RecPlaylist) {
-		describeError = '';
-		modalPlaylist = playlist;
-		modalLoading = false;
-		modalOpen = true;
+	// Per-shelf save state, keyed by playlist.key — each row saves independently.
+	type SaveState = { status: 'saving' | 'saved' | 'error'; url?: string | null; error?: string };
+	let saveStates = $state<Record<string, SaveState>>({});
+
+	async function saveRow(playlist: RecPlaylist) {
+		if (saveStates[playlist.key]?.status === 'saving') return;
+		saveStates[playlist.key] = { status: 'saving' };
+		try {
+			const result = await createPlaylist({
+				name: playlist.name,
+				description: playlist.description,
+				trackUris: playlist.trackUris,
+				isPublic: false
+			});
+			saveStates[playlist.key] = { status: 'saved', url: result.spotifyUrl };
+		} catch (error) {
+			saveStates[playlist.key] = {
+				status: 'error',
+				error: error instanceof Error ? error.message : 'Could not save to Spotify.'
+			};
+		}
 	}
 </script>
 
@@ -146,26 +166,58 @@
 	</div>
 {:else if feed}
 	<div class="feed">
-		{#if feed.playlists.length}
+		{#each feed.playlists as playlist (playlist.key)}
+			{@const save = saveStates[playlist.key]}
 			<section class="shelf">
-				<h2>Made for you</h2>
-				<div class="playlist-grid">
-					{#each feed.playlists as playlist (playlist.key)}
-						<button type="button" class="playlist-card" onclick={() => openPlaylist(playlist)}>
+				<header class="shelf-head">
+					<div class="shelf-title">
+						<h2>{playlist.name}</h2>
+						<small>{playlist.description} · {playlist.tracks.length} tracks</small>
+					</div>
+					{#if save?.status === 'saved' && save.url}
+						<a class="save" href={save.url} target="_blank" rel="noreferrer noopener">
+							<ExternalLink size={15} strokeWidth={2.2} /> Open in Spotify
+						</a>
+					{:else}
+						<button
+							type="button"
+							class="save"
+							onclick={() => saveRow(playlist)}
+							disabled={save?.status === 'saving'}
+						>
+							{save?.status === 'saving' ? 'Saving…' : 'Save as playlist'}
+						</button>
+					{/if}
+				</header>
+				{#if save?.status === 'error'}<p class="error">{save.error}</p>{/if}
+				<div class="rail">
+					{#each playlist.tracks as track, index (track.spotifyTrackId ?? index)}
+						<article class="song">
 							<MediaThumb
 								kind="cover"
-								src={playlist.coverUrl}
-								alt={`${playlist.name} cover`}
+								src={track.coverUrl}
+								alt={`${track.album} artwork`}
 								size="large"
-								label={playlist.name}
+								label={track.title}
 							/>
-							<strong>{playlist.name}</strong>
-							<small>{playlist.description}</small>
-						</button>
+							<strong>{track.title}</strong>
+							<small>{track.artist}</small>
+							{#if track.externalUrl}
+								<a
+									class="open"
+									href={track.externalUrl}
+									target="_blank"
+									rel="noreferrer noopener"
+									aria-label={`Open ${track.title} in Spotify`}
+								>
+									<ExternalLink size={16} strokeWidth={2.2} />
+								</a>
+							{/if}
+						</article>
 					{/each}
 				</div>
 			</section>
-		{/if}
+		{/each}
 
 		{#each feed.rows as row (row.key)}
 			<section class="shelf">
@@ -338,9 +390,54 @@
 		gap: 34px;
 	}
 
-	.shelf h2 {
+	.shelf-head {
+		display: flex;
+		align-items: end;
+		justify-content: space-between;
+		gap: 16px;
 		margin: 0 0 14px;
+	}
+
+	.shelf h2 {
+		margin: 0;
 		font-size: 1.3rem;
+	}
+
+	.shelf-title small {
+		display: block;
+		margin-top: 4px;
+		color: #a7a7a7;
+		font-size: 0.82rem;
+	}
+
+	.save {
+		display: inline-flex;
+		align-items: center;
+		gap: 7px;
+		flex: none;
+		padding: 8px 16px;
+		border: 1px solid var(--color-border);
+		border-radius: 999px;
+		background: transparent;
+		color: #fff;
+		font-size: 0.85rem;
+		font-weight: 600;
+		cursor: pointer;
+		transition:
+			background 160ms ease,
+			border-color 160ms ease,
+			color 160ms ease;
+	}
+
+	.save:hover:not(:disabled) {
+		border-color: #1ed760;
+		background: #1ed760;
+		color: #071108;
+	}
+
+	.save:disabled {
+		opacity: 0.6;
+		cursor: default;
 	}
 
 	.rail {
@@ -408,44 +505,6 @@
 	.open:hover {
 		background: #1ed760;
 		color: #071108;
-	}
-
-	/* playlists */
-	.playlist-grid {
-		display: grid;
-		grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
-		gap: 16px;
-	}
-
-	.playlist-card {
-		display: grid;
-		align-content: start;
-		gap: 4px;
-		padding: 14px;
-		border: 0;
-		border-radius: 10px;
-		background: #181818;
-		color: #fff;
-		text-align: left;
-		cursor: pointer;
-		transition: background 160ms ease;
-	}
-
-	.playlist-card:hover {
-		background: #242424;
-	}
-
-	.playlist-card strong {
-		margin-top: 10px;
-		font-size: 0.98rem;
-	}
-
-	.playlist-card small {
-		color: #a7a7a7;
-		font-size: 0.82rem;
-		overflow: hidden;
-		text-overflow: ellipsis;
-		white-space: nowrap;
 	}
 
 	/* states */
