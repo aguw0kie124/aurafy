@@ -545,14 +545,18 @@ def _nearest_by_cosine(
 
 
 def _cluster_name(reps: list[dict[str, str]], fallback: str) -> str:
-    """Name a taste mode after its two most representative distinct artists."""
+    """Name a taste mode after its two most representative distinct artists.
+
+    ``artist`` is every credited name comma-joined ("Chief Keef, Tray Savage, Tadoe"),
+    so take each rep's *lead* artist — joining the raw strings reads as a credits list,
+    not a name."""
     artists: list[str] = []
     seen: set[str] = set()
     for rep in reps:
-        artist = (rep.get("artist") or "").strip()
-        if artist and artist.lower() not in seen:
-            seen.add(artist.lower())
-            artists.append(artist)
+        lead = (rep.get("artist") or "").split(",")[0].strip()
+        if lead and lead.lower() not in seen:
+            seen.add(lead.lower())
+            artists.append(lead)
         if len(artists) == 2:
             break
     return f"{', '.join(artists)} & similar" if artists else fallback
