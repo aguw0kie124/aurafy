@@ -3,8 +3,9 @@
 If you're always getting bored of your playlists, this is for you.
 
 Aurafy gives you a **For You** feed of new songs picked to match your Spotify
-taste, plus a **Recap** of your recent listening. Anything it surfaces can be
-saved straight to your Spotify account as a playlist.
+taste — one row per distinct "taste mode" it finds in your library — plus a
+**Recap** of your recent listening. Anything it surfaces can be saved straight
+to your Spotify account as a playlist.
 
 ## How it works
 
@@ -42,7 +43,8 @@ Gemini key, both fall back to a deterministic taste-ranked sort.
   from retrieved candidates **only** — returned ids are validated, so nothing is
   hallucinated in.
 - **Clustering:** scikit-learn **k-means** over your library vectors surfaces distinct
-  "taste modes," each seeded into its own playlist.
+  "taste modes." Each mode is one row of the For You feed — its centroid seeds the ANN
+  query that fills the row — and each row saves to Spotify as a playlist in one click.
 
 ## Run it locally
 
