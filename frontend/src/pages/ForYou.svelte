@@ -358,6 +358,13 @@
 		gap: 34px;
 	}
 
+	/* Grid items default to min-width:auto, so a shelf would stretch to the rail's
+	   min-content width (every card laid end to end) and scroll the whole page
+	   sideways instead of the rail. */
+	.shelf {
+		min-width: 0;
+	}
+
 	.shelf-head {
 		display: flex;
 		align-items: end;
