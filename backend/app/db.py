@@ -422,11 +422,18 @@ async def upsert_catalog_tracks(
 
 
 async def vector_search_catalog(
-    user_id: str, query_vec: list[float], k: int, allow_explicit: bool
+    user_id: str, query_vec: list[float], k: int, allow_explicit: bool,
+    exclude_owned: bool = True,
 ) -> list[dict[str, Any]]:
-    """ANN retrieval: catalog tracks nearest ``query_vec`` (cosine), excluding
-    tracks the user already owns. Uses the HNSW index; most-similar first.
-    ``similarity`` is 1 - cosine_distance (1.0 = identical, 0.0 = orthogonal)."""
+    """ANN retrieval: catalog tracks nearest ``query_vec`` (cosine). Uses the HNSW
+    index; most-similar first. ``similarity`` is 1 - cosine_distance (1.0 = identical,
+    0.0 = orthogonal).
+
+    ``exclude_owned`` (default) skips tracks already in the user's library — what the
+    feed wants, since its shelves are purely for discovery. The playlist builder passes
+    False so one search covers both halves: the user's own tracks and the wider catalog
+    live in the same table with the same embeddings, so whichever genuinely sits nearest
+    the query wins, and the caller tags each row familiar/discovery afterwards."""
     rows = await pool.fetch(
         f"""
         with lib as ({_LIBRARY_IDS_SQL})
@@ -435,12 +442,12 @@ async def vector_search_catalog(
                1 - (t.embedding <=> $2) as similarity
         from tracks t
         where t.embedding is not null
-          and t.spotify_track_id not in (select spotify_track_id from lib)
+          and (not $5 or t.spotify_track_id not in (select spotify_track_id from lib))
           and ($3 or t.explicit = false)
         order by t.embedding <=> $2
         limit $4
         """,
-        user_id, query_vec, allow_explicit, k,
+        user_id, query_vec, allow_explicit, k, exclude_owned,
     )
     return [
         {
@@ -456,25 +463,6 @@ async def vector_search_catalog(
         }
         for r in rows
     ]
-
-
-async def vibe_scores(track_ids: list[str], query_vec: list[float]) -> dict[str, float]:
-    """Cosine similarity (1 - distance) of each track to a query vector. Used to
-    rank the user's *familiar* tracks by how well they fit the request's vibe —
-    taste-fit can't (a library track's nearest library neighbor is itself), so
-    without this the familiar half ignores the request. Missing/unembedded ids
-    are absent from the result."""
-    if not track_ids:
-        return {}
-    rows = await pool.fetch(
-        """
-        select spotify_track_id, 1 - (embedding <=> $2) as similarity
-        from tracks
-        where spotify_track_id = any($1::text[]) and embedding is not null
-        """,
-        track_ids, query_vec,
-    )
-    return {r["spotify_track_id"]: float(r["similarity"]) for r in rows}
 
 
 def _to_list(vec: Any) -> list[float]:
@@ -571,23 +559,6 @@ _LIBRARY_IDS_SQL = """
 """
 
 
-async def get_genre_weights(user_id: str) -> list[dict[str, Any]]:
-    """Genre -> summed taste weight, highest first."""
-    rows = await pool.fetch(
-        _USER_TRACKS_CTE
-        + """
-        select ag.genre, sum(ut.w) as weight
-        from user_tracks ut
-        join track_artists ta on ta.spotify_track_id = ut.spotify_track_id
-        join artist_genres ag on ag.spotify_artist_id = ta.spotify_artist_id
-        group by ag.genre
-        order by weight desc
-        """,
-        user_id,
-    )
-    return [{"genre": r["genre"], "weight": float(r["weight"])} for r in rows]
-
-
 async def get_artist_weights(user_id: str) -> list[dict[str, Any]]:
     """Artist -> summed taste weight (from tracks + top artists), highest first."""
     rows = await pool.fetch(
@@ -636,36 +607,3 @@ _ARTIST_IDS_AND_GENRES_SQL = """
 """
 
 
-def _candidate_rows_to_dicts(rows: list[asyncpg.Record]) -> list[dict[str, Any]]:
-    return [
-        {
-            "spotify_track_id": r["spotify_track_id"],
-            "title": r["title"],
-            "artist": r["artist"],
-            "album": r["album"],
-            "image_url": r["image_url"],
-            "external_url": r["external_url"],
-            "popularity": r["popularity"] or 0,
-            "explicit": r["explicit"],
-            "artist_ids": list(r["artist_ids"]),
-            "genres": list(r["genres"]),
-        }
-        for r in rows
-    ]
-
-
-async def get_library_candidates(user_id: str, allow_explicit: bool) -> list[dict[str, Any]]:
-    """The user's own stored tracks (familiar pool), each with its artist ids + genres."""
-    rows = await pool.fetch(
-        f"""
-        with lib as ({_LIBRARY_IDS_SQL})
-        select t.spotify_track_id, t.title, t.artist, t.album, t.image_url, t.external_url,
-               t.popularity, t.explicit,
-               {_ARTIST_IDS_AND_GENRES_SQL}
-        from lib
-        join tracks t on t.spotify_track_id = lib.spotify_track_id
-        where ($2 or t.explicit = false)
-        """,
-        user_id, allow_explicit,
-    )
-    return _candidate_rows_to_dicts(rows)

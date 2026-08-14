@@ -60,8 +60,14 @@ def track_doc(row: dict[str, Any]) -> str:
 # --- embedding calls --------------------------------------------------------
 
 
-async def _embed_batch(texts: list[str]) -> list[list[float]] | None:
-    """Embed one batch; None on any failure (network/quota) so callers skip it."""
+class EmbeddingError(RuntimeError):
+    """An embedding call failed. Raised on the request path (where the caller needs
+    to report *why*); the throttled backfill keeps its None-means-skip contract."""
+
+
+async def _embed(texts: list[str]) -> list[list[float]]:
+    """Embed one batch. Raises EmbeddingError carrying the real cause — a 429 quota
+    error and a network drop want very different responses from the caller."""
     from google.genai import types
 
     client = _get_client()
@@ -72,9 +78,24 @@ async def _embed_batch(texts: list[str]) -> list[list[float]] | None:
             contents=texts,
             config=types.EmbedContentConfig(output_dimensionality=EMBED_DIM),
         )
-    except Exception:
-        return None
+    except Exception as exc:
+        raise EmbeddingError(str(exc)) from exc
     return [list(e.values) for e in resp.embeddings]
+
+
+async def embed_query(text: str) -> list[float]:
+    """Embed one text as a retrieval query vector. Raises EmbeddingError — without a
+    query vector there is no retrieval, so this cannot be degraded past."""
+    return (await _embed([text]))[0]
+
+
+async def _embed_batch(texts: list[str]) -> list[list[float]] | None:
+    """Embed one batch; None on any failure (network/quota) so the backfill can skip
+    the batch and resume on its next run."""
+    try:
+        return await _embed(texts)
+    except EmbeddingError:
+        return None
 
 
 async def embed_texts(texts: list[str]) -> list[list[float] | None]:

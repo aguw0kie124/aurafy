@@ -1,4 +1,4 @@
-import { API_BASE_URL } from '$lib/config';
+import { API_BASE_URL } from '@/lib/config';
 
 export type StatsRangeValue = 'short_term' | 'medium_term' | 'long_term';
 
@@ -94,36 +94,41 @@ type SpotifyTopResponse = {
 
 const DEFAULT_RANGE: StatsRangeValue = 'short_term';
 
-export const dashboardSummary: DashboardSummary = {
-	totalMinutes: null,
-	currentArtist: null,
-	currentArtistImageUrl: null
+// Everything the Recap page renders for one time range.
+export type MusicData = {
+	summary: DashboardSummary;
+	artists: Artist[];
+	tracks: Track[];
+	albums: Album[];
+	musicalDna: MusicalDnaMetric[];
 };
 
-export const artists: Artist[] = [];
-export const tracks: Track[] = [];
-export const albums: Album[] = [];
-export const musicalDna: MusicalDnaMetric[] = [];
+export function emptyMusicData(): MusicData {
+	return {
+		summary: createEmptyDashboardSummary(),
+		artists: [],
+		tracks: [],
+		albums: [],
+		musicalDna: []
+	};
+}
 
-let latestMusicRequestId = 0;
-
-export async function loadMusicData(range: StatsRangeValue = DEFAULT_RANGE) {
-	const requestId = ++latestMusicRequestId;
+export async function loadMusicData(range: StatsRangeValue = DEFAULT_RANGE): Promise<MusicData> {
 	const query = `range=${encodeURIComponent(range)}`;
 	const [recap, spotifyTop] = await Promise.all([
 		fetchJson<RecapResponse>(`/api/stats/recap?${query}`).catch(() => createEmptyRecap()),
 		fetchJson<SpotifyTopResponse>(`/api/spotify/top?${query}&limit=50`)
 	]);
 
-	if (requestId !== latestMusicRequestId) {
-		return;
-	}
+	const summary = recap.summary ?? createEmptyDashboardSummary();
 
-	Object.assign(dashboardSummary, recap.summary ?? createEmptyDashboardSummary());
-	replaceArray(tracks, spotifyTop.tracks ?? spotifyTop.Tracks ?? []);
-	replaceArray(artists, spotifyTop.artists ?? spotifyTop.Artists ?? []);
-	replaceArray(albums, spotifyTop.albums ?? spotifyTop.Albums ?? []);
-	replaceArray(musicalDna, buildMusicalDna(recap));
+	return {
+		summary,
+		tracks: spotifyTop.tracks ?? spotifyTop.Tracks ?? [],
+		artists: spotifyTop.artists ?? spotifyTop.Artists ?? [],
+		albums: spotifyTop.albums ?? spotifyTop.Albums ?? [],
+		musicalDna: buildMusicalDna(recap, summary)
+	};
 }
 
 export async function syncListeningHistory(force = false) {
@@ -194,11 +199,9 @@ export type ProposedPlaylist = {
 // The "describe a vibe" box: the backend runs the LLM interpret step on the
 // instruction, then retrieves + curates a proposed playlist.
 export type PlaylistPreviewInput = {
-	mode: 'instruction';
-	instruction?: string;
+	instruction: string;
 	length?: number;
 	allowExplicit?: boolean;
-	name?: string;
 };
 
 export async function previewPlaylist(input: PlaylistPreviewInput) {
@@ -250,10 +253,6 @@ export async function createPlaylist(input: {
 	});
 }
 
-function replaceArray<T>(target: T[], next: T[]) {
-	target.splice(0, target.length, ...next);
-}
-
 function createEmptyDashboardSummary(): DashboardSummary {
 	return {
 		totalMinutes: null,
@@ -269,17 +268,17 @@ function createEmptyRecap(): RecapResponse {
 	};
 }
 
-function buildMusicalDna(recap: RecapResponse): MusicalDnaMetric[] {
+function buildMusicalDna(recap: RecapResponse, summary: DashboardSummary): MusicalDnaMetric[] {
 	const peakWindow = recap.timeOfDay
 		.filter((item) => item.listeningMinutes && item.listeningMinutes > 0)
 		.sort((a, b) => (b.listeningMinutes ?? 0) - (a.listeningMinutes ?? 0))[0];
 
 	const metrics: MusicalDnaMetric[] = [];
 
-	if (dashboardSummary.totalMinutes !== null) {
+	if (summary.totalMinutes !== null) {
 		metrics.push({
 			label: 'Minutes logged',
-			value: dashboardSummary.totalMinutes.toLocaleString(),
+			value: summary.totalMinutes.toLocaleString(),
 			glyph: 'bolt'
 		});
 	}

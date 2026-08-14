@@ -1,20 +1,21 @@
 import { defineConfig } from 'vite';
-import { svelte } from '@sveltejs/vite-plugin-svelte';
+import react from '@vitejs/plugin-react';
 import path from 'node:path';
 
 export default defineConfig({
 	envPrefix: ['VITE_', 'PUBLIC_'],
-	plugins: [
-		svelte({
-			compilerOptions: {
-				runes: true
-			}
-		})
-	],
+	plugins: [react()],
 	publicDir: 'static',
+	// Stylesheets use hyphenated class names; expose them to JS in camelCase
+	// (styles.topbarInner -> .topbar-inner).
+	css: {
+		modules: {
+			localsConvention: 'camelCase'
+		}
+	},
 	resolve: {
 		alias: {
-			$lib: path.resolve('./src/lib')
+			'@': path.resolve('./src')
 		}
 	}
 });

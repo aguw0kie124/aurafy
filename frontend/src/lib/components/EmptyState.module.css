@@ -1,0 +1,12 @@
+.empty-state {
+	display: grid;
+	min-height: 180px;
+	place-items: center;
+	border: 1px dashed rgba(255, 255, 255, 0.14);
+	border-radius: 10px;
+	color: #aeb5b0;
+}
+
+.empty-state.compact {
+	min-height: 132px;
+}

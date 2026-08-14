@@ -7,29 +7,32 @@
 		"dev": "vite dev --host 127.0.0.1",
 		"build": "vite build",
 		"preview": "vite preview",
-		"check": "svelte-check --tsconfig ./tsconfig.json",
-		"check:watch": "svelte-check --tsconfig ./tsconfig.json --watch",
+		"check": "tsc --noEmit",
+		"check:watch": "tsc --noEmit --watch",
 		"lint": "prettier --check . && eslint .",
 		"format": "prettier --write ."
 	},
 	"devDependencies": {
 		"@eslint/compat": "^2.0.4",
 		"@eslint/js": "^10.0.1",
-		"@sveltejs/vite-plugin-svelte": "^7.0.0",
 		"@types/node": "^24",
+		"@types/react": "^19.2.2",
+		"@types/react-dom": "^19.2.2",
+		"@vitejs/plugin-react": "^5.0.4",
 		"eslint": "^10.2.0",
 		"eslint-config-prettier": "^10.1.8",
-		"eslint-plugin-svelte": "^3.17.0",
+		"eslint-plugin-react-hooks": "^7.0.1",
+		"eslint-plugin-react-refresh": "^0.4.24",
 		"globals": "^17.4.0",
 		"prettier": "^3.8.1",
-		"prettier-plugin-svelte": "^3.5.1",
-		"svelte": "^5.55.2",
-		"svelte-check": "^4.4.6",
 		"typescript": "^6.0.2",
 		"typescript-eslint": "^8.58.1",
 		"vite": "^8.0.7"
 	},
 	"dependencies": {
-		"@lucide/svelte": "^0.511.0"
+		"lucide-react": "^0.511.0",
+		"react": "^19.2.0",
+		"react-dom": "^19.2.0",
+		"react-router-dom": "^7.9.4"
 	}
 }

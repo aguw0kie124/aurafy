@@ -1,0 +1,15 @@
+.section-heading h1,
+.section-heading p {
+	margin: 0;
+}
+
+.section-heading h1 {
+	font-size: clamp(1.8rem, 3vw, 2.45rem);
+	line-height: 1.1;
+}
+
+.section-heading p {
+	margin-top: 10px;
+	color: #c5cbc7;
+	font-size: 1.02rem;
+}

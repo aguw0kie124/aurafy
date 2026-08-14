@@ -1,4 +1,4 @@
-# Aurafy — single-origin image: FastAPI serves the built Svelte app.
+# Aurafy — single-origin image: FastAPI serves the built React app.
 
 # Stage 1: build the frontend. PUBLIC_API_BASE_URL is empty so the app calls
 # the API with relative URLs (same origin as the page).

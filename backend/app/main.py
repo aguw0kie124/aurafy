@@ -19,7 +19,7 @@ from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import db, embeddings, recommender
+from . import db, embeddings, llm, recommender
 
 try:
     from dotenv import load_dotenv
@@ -27,7 +27,7 @@ except ImportError:
     load_dotenv = None
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-# Built Svelte app, served in single-origin production deploys. Absent in local
+# Built React app, served in single-origin production deploys. Absent in local
 # dev (frontend runs on the Vite server), in which case static serving is off.
 FRONTEND_DIST = (PROJECT_ROOT / "frontend" / "dist").resolve()
 if load_dotenv is not None:
@@ -79,6 +79,12 @@ COOKIE_SECURE = FRONTEND_ORIGIN.startswith("https")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Gemini backs interpretation, discovery and curation — every one of them
+    # load-bearing. Fail here rather than letting requests discover it one by one.
+    if not llm.is_configured():
+        raise RuntimeError(
+            "GEMINI_API_KEY (or GOOGLE_API_KEY) is required — set it before starting the app."
+        )
     await db.connect()
     await db.delete_expired_sessions()
     yield
@@ -823,7 +829,6 @@ async def sync_library(request: Request) -> dict[str, Any]:
 
     return {
         "syncedAt": utc_now_iso(),
-        "genresInferred": 0,
         "embedding": "started" if embedding_started else "skipped",
         "counts": {
             "savedTracks": len(saved_tracks),
@@ -839,12 +844,9 @@ async def sync_library(request: Request) -> dict[str, Any]:
 
 
 class PlaylistPreviewRequest(BaseModel):
-    mode: str = "instruction"
     instruction: str | None = None
     length: int = 25
     allowExplicit: bool = True
-    name: str | None = None
-    description: str | None = None
 
 
 class PlaylistCreateRequest(BaseModel):
@@ -857,18 +859,24 @@ class PlaylistCreateRequest(BaseModel):
 @app.post("/api/playlist/preview")
 async def preview_playlist(request: Request, body: PlaylistPreviewRequest) -> dict[str, Any]:
     """Build a proposed (uncommitted) playlist via the RAG recommender:
-    interpret -> retrieve (pgvector + search) -> rerank (kNN) -> curate -> safety."""
+    interpret -> retrieve (pgvector + live search) -> curate -> safety."""
     session = await require_session(request)
-    return await recommender.build(session, body)
+    try:
+        return await recommender.build(session, body)
+    except (llm.LLMError, embeddings.EmbeddingError) as exc:
+        raise HTTPException(status_code=503, detail=f"The AI step failed: {exc}") from exc
 
 
 @app.get("/api/recommendations")
 async def recommendations(request: Request, refresh: bool = Query(False)) -> dict[str, Any]:
-    """The For You feed: one curated playlist per taste mode, with new music sourced
+    """The For You feed: one playlist per k-means taste mode, with new music sourced
     live from Spotify. Cached per user; ``?refresh=1`` (the Refresh button) rebuilds
     it."""
     session = await require_session(request)
-    return await recommender.recommend(session, force=refresh)
+    try:
+        return await recommender.recommend(session, force=refresh)
+    except (llm.LLMError, embeddings.EmbeddingError) as exc:
+        raise HTTPException(status_code=503, detail=f"The AI step failed: {exc}") from exc
 
 
 @app.post("/api/playlist/create")

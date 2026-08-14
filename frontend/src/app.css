@@ -113,6 +113,17 @@ a:focus-visible {
 	}
 }
 
+/* Applied to the topbar's lucide sync icon, which renders its own element. */
+.spin {
+	animation: spin 0.9s linear infinite;
+}
+
+@keyframes spin {
+	to {
+		transform: rotate(360deg);
+	}
+}
+
 ::selection {
 	background: rgba(30, 215, 96, 0.32);
 	color: #fff;

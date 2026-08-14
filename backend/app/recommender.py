@@ -1,21 +1,30 @@
-"""The recommender: a single-pass RAG pipeline.
+"""The recommender. Two features, deliberately two different shapes.
 
-    interpret -> retrieve -> rerank -> curate (RAG) -> safety
+THE FEED (``recommend``) — "For You" shelves. There is no stated intent to satisfy,
+just "more of what this person likes", which is a pure retrieval problem: k-means
+over the user's library embeddings finds their taste modes, and each cluster's
+centroid drives an ANN search over the catalog. No LLM curation — with no request to
+reason about, it would have nothing to add.
 
-1. ``llm.interpret`` turns the request into a spec + a "vibe" sentence + discovery
-   name ideas (skipped for parameter builds / when Gemini is unconfigured).
-2. RETRIEVE: the user's own library (familiar) + discovery = pgvector nearest-to-
-   the-embedded-vibe over the catalog + live Spotify search of the discovery names
-   (new finds are persisted and embedded — the catalog flywheel).
-3. RERANK: ``db.knn_taste_scores`` (taste-fit) blended with vibe similarity and
-   popularity; keep the strongest ~40 with metadata.
-4. CURATE (the RAG step): ``llm.curate`` selects + orders the final playlist from
-   those ~40 retrieved tracks; returned ids are validated against the supplied set,
-   so nothing invented survives.
-5. SAFETY: avoid-genre filter, title+artist dedupe, per-artist cap, variety order.
+THE PLAYLIST BUILDER (``build``) — "describe a playlist". Here there IS stated intent,
+with nuance a single vector flattens ("upbeat but not too aggressive, for a workout"),
+which is what earns the generation step:
 
-Every step degrades gracefully: no Gemini key / no embeddings / a rate limit falls
-back to a deterministic taste-ranked build, so a build never hard-fails.
+    interpret -> retrieve -> curate (RAG) -> safety
+
+1. INTERPRET: ``llm.interpret`` turns the request into a spec + one "vibe" sentence.
+2. RETRIEVE: grow the catalog first (``llm.discovery_ideas`` -> live Spotify search ->
+   persist + embed), so fresh finds are already in the index; then ONE ANN query for
+   the tracks nearest the embedded vibe. Owned and unowned tracks share the table and
+   the embedding space, so a single search covers both and each row is tagged
+   familiar/discovery afterwards. kNN taste-fit rides along as a column.
+3. CURATE (the RAG step): ``llm.curate`` picks and orders the playlist from those
+   retrieved rows; returned ids are validated against the supplied set, so nothing
+   invented survives.
+4. SAFETY: avoid-genre filter, title+artist dedupe, per-artist cap, variety order.
+
+Gemini is required, not optional: interpret/discovery/curate failures raise rather
+than falling back to a second, weaker implementation of the same feature.
 """
 
 from __future__ import annotations
@@ -49,42 +58,22 @@ SEARCH_CONCURRENCY = 6
 # --- spec ------------------------------------------------------------------
 
 
-def _normalize_spec(spec: dict[str, Any]) -> dict[str, Any]:
-    """Clamp a raw spec (from the LLM or UI params) into safe pipeline inputs."""
-    length = int(spec.get("length") or DEFAULT_LENGTH)
-    length = max(MIN_LENGTH, min(length, MAX_LENGTH))
-    mix = spec.get("mix")
-    mix = 30 if mix is None else int(mix)
-    mix = max(0, min(mix, 100))
+def _normalize_spec(spec: dict[str, Any], length: int) -> dict[str, Any]:
+    """Clamp the LLM's raw spec into safe pipeline inputs. ``length`` comes from the
+    UI's own dropdown, never the model — the user already picked a number, so asking
+    the model to guess one only creates a way to ignore them."""
+    length = max(MIN_LENGTH, min(int(length or DEFAULT_LENGTH), MAX_LENGTH))
     genres = [g.strip().lower() for g in (spec.get("genres") or []) if isinstance(g, str) and g.strip()]
     avoid = [g.strip().lower() for g in (spec.get("avoid_genres") or []) if isinstance(g, str) and g.strip()]
     return {
         "name": (spec.get("name") or "").strip() or "Aurafy Mix",
         "description": (spec.get("description") or "").strip(),
         "length": length,
-        "mix": mix,
         "allow_explicit": bool(spec.get("allow_explicit", True)),
         "genres": genres[:8],
         "avoid_genres": avoid[:8],
         "vibe": (spec.get("vibe") or "").strip(),
-        "discovery_artists": list(spec.get("discovery_artists") or []),
-        "discovery_tracks": list(spec.get("discovery_tracks") or []),
     }
-
-
-def _spec_from_params(body: Any) -> dict[str, Any]:
-    """Fallback spec when the LLM is unavailable: use the instruction text (if any)
-    as the vibe so ANN retrieval still has a meaningful query; the caller defaults
-    the vibe to the user's top genres when there's nothing to go on."""
-    return _normalize_spec(
-        {
-            "name": body.name or "Aurafy Mix",
-            "description": body.description or "",
-            "length": body.length,
-            "allow_explicit": body.allowExplicit,
-            "vibe": (body.instruction or body.description or "").strip(),
-        }
-    )
 
 
 # --- genre helpers (lifted from the retired engine) -------------------------
@@ -162,25 +151,24 @@ async def _search_tracks(client: httpx.AsyncClient, token: str, query: str) -> l
     return tracks
 
 
-async def _live_discovery(
-    session: dict[str, Any], spec: dict[str, Any], owned: set[str]
+async def _resolve_names(
+    session: dict[str, Any],
+    artists: list[str],
+    tracks: list[dict[str, str]],
+    owned: set[str],
+    allow_explicit: bool,
 ) -> list[dict[str, Any]]:
-    """Resolve the LLM's discovery names through live Spotify search into real,
-    non-owned candidate tracks. Best-effort: any failure yields fewer candidates."""
+    """Resolve LLM-suggested artist/track NAMES through live Spotify search into real,
+    non-owned candidate tracks. A name that doesn't exist simply finds nothing, which
+    is what keeps invented suggestions out of the catalog."""
     from .main import refresh_access_token
 
-    artists = spec["discovery_artists"]
-    tracks = spec["discovery_tracks"]
     if not artists and not tracks:
         return []
     queries = [f'artist:"{n}"' for n in artists[:10]]
     queries += [f'track:"{t["title"]}" artist:"{t["artist"]}"' for t in tracks[:10]]
 
-    try:
-        token = await refresh_access_token(session)
-    except Exception:
-        return []
-
+    token = await refresh_access_token(session)
     sem = asyncio.Semaphore(SEARCH_CONCURRENCY)
 
     async def run(q: str) -> list[dict[str, Any]]:
@@ -196,14 +184,32 @@ async def _live_discovery(
             if track["id"] not in owned:
                 found.setdefault(track["id"], _cand_from_spotify(track))
     cands = list(found.values())
-    if not spec["allow_explicit"]:
+    if not allow_explicit:
         cands = [c for c in cands if not c["explicit"]]
     return cands
 
 
+async def grow_catalog(
+    session: dict[str, Any],
+    top_artists: list[str],
+    owned: set[str],
+    allow_explicit: bool,
+    vibe: str = "",
+) -> list[dict[str, Any]]:
+    """The one way new music enters the catalog, shared by the feed and the playlist
+    builder. Spotify's /recommendations endpoint is dead for dev-mode apps, so instead:
+    ask Gemini to NAME artists/tracks this listener probably doesn't know, confirm each
+    name is real via Spotify search, then persist + embed the survivors. Because the
+    embedding happens here, the finds are ANN-retrievable immediately after this returns."""
+    ideas = await llm.discovery_ideas(top_artists, vibe)
+    found = await _resolve_names(session, ideas["artists"], ideas["tracks"], owned, allow_explicit)
+    await _persist_and_embed(found)
+    return found
+
+
 async def _persist_and_embed(cands: list[dict[str, Any]]) -> None:
-    """Persist live finds into the shared catalog and embed them inline so kNN /
-    curation / future ANN can use them (the discovery flywheel). Best-effort."""
+    """Persist live finds into the shared catalog and embed them inline, so the very
+    next ANN query can retrieve them (the discovery flywheel)."""
     if not cands:
         return
     artists: dict[str, dict[str, Any]] = {}
@@ -212,20 +218,12 @@ async def _persist_and_embed(cands: list[dict[str, Any]]) -> None:
         for pos, (aid, name) in enumerate(zip(c["artist_ids"], c["artist_name_list"])):
             artists.setdefault(aid, {"spotify_artist_id": aid, "name": name})
             track_artists.append((c["spotify_track_id"], aid, pos))
-    try:
-        await db.upsert_catalog_tracks(list(artists.values()), cands, track_artists)
-    except Exception:
-        return
-    if not embeddings.is_configured():
-        return
-    try:
-        docs = [embeddings.track_doc(c) for c in cands]
-        vecs = await embeddings.embed_texts(docs)
-        pairs = [(c["spotify_track_id"], v) for c, v in zip(cands, vecs) if v is not None]
-        if pairs:
-            await db.store_track_embeddings(pairs)
-    except Exception:
-        pass
+    await db.upsert_catalog_tracks(list(artists.values()), cands, track_artists)
+    docs = [embeddings.track_doc(c) for c in cands]
+    vecs = await embeddings.embed_texts(docs)
+    pairs = [(c["spotify_track_id"], v) for c, v in zip(cands, vecs) if v is not None]
+    if pairs:
+        await db.store_track_embeddings(pairs)
 
 
 # --- enrichment & scoring ---------------------------------------------------
@@ -243,15 +241,6 @@ async def _enrich_genres(cands: list[dict[str, Any]]) -> None:
             c["artist_ids"] = c.get("artist_ids") or m["artist_ids"]
             c["artist_name_list"] = c.get("artist_name_list") or m["artist_name_list"]
             c["genres"] = m["genres"] or c.get("genres") or []
-
-
-def _discovery_score(c: dict[str, Any]) -> float:
-    """Blend taste-fit, vibe similarity, and a little popularity."""
-    return (
-        c.get("taste", 0.0)
-        + 0.4 * c.get("similarity", 0.0)
-        + 0.1 * (c.get("popularity") or 0) / 100.0
-    )
 
 
 # --- output -----------------------------------------------------------------
@@ -283,146 +272,63 @@ def _finalize(chosen: list[dict[str, Any]], spec: dict[str, Any]) -> dict[str, A
 
 
 async def build(session: dict[str, Any], body: Any) -> dict[str, Any]:
-    """Build a proposed (uncommitted) playlist from a request."""
+    """Build a proposed (uncommitted) playlist from a free-text request."""
     user_id = session["user_id"]
+    instruction = (body.instruction or "").strip()
+    if not instruction:
+        raise HTTPException(status_code=422, detail="Describe the playlist you want.")
 
-    # 1) INTERPRET — LLM for instruction mode, else straight from UI params.
-    genre_rows = await db.get_genre_weights(user_id)
     artist_rows = await db.get_artist_weights(user_id)
-    top_genres = [r["genre"] for r in genre_rows[:12]]
     top_artists = [r["name"] for r in artist_rows[:15]]
 
-    spec: dict[str, Any] | None = None
-    if getattr(body, "mode", "params") == "instruction" and (body.instruction or "").strip() and llm.is_configured():
-        interpreted = await llm.interpret(body.instruction, top_genres, top_artists)
-        if interpreted:
-            spec = _normalize_spec(interpreted)
-    if spec is None:
-        spec = _spec_from_params(body)
-
-    # No described vibe (LLM unavailable / thin instruction) — default it to the
-    # user's top genres so the query vector still means something.
+    # 1) INTERPRET — the request becomes a spec plus one "vibe" sentence, which is
+    #    the only thing retrieval actually queries on.
+    spec = _normalize_spec(await llm.interpret(instruction, top_artists), body.length)
     if not spec["vibe"]:
-        spec["vibe"] = ", ".join(top_genres[:8])
-
-    # Discovery = NEW music, drawn from the user's taste. Instruction mode already
-    # gets fresh names from `interpret`; for params/preset builds ask the LLM for
-    # artists/tracks the listener likely DOESN'T know yet (the whole point is finding
-    # new music, not resurfacing their own). Fall back to their top artists' deeper
-    # cuts only if the LLM is unavailable, so discovery is never empty.
-    if spec["mix"] > 0 and not spec["discovery_artists"] and not spec["discovery_tracks"]:
-        ideas = await llm.discovery_ideas(top_genres, top_artists) if llm.is_configured() else None
-        if ideas:
-            spec["discovery_artists"] = ideas["artists"][:8]
-            spec["discovery_tracks"] = ideas["tracks"][:10]
-        else:
-            spec["discovery_artists"] = top_artists[:8]
-
+        spec["vibe"] = instruction
     allow_explicit = spec["allow_explicit"]
     avoid = set(spec["avoid_genres"])
     length = spec["length"]
 
-    # 2) RETRIEVE
+    # 2) RETRIEVE. Grow the catalog FIRST — `grow_catalog` embeds what it finds, so
+    #    those tracks are already in the HNSW index when the ANN query runs a moment
+    #    later and need no separate merge/score path of their own.
     owned = await db.get_library_track_ids(user_id)
-    familiar = await db.get_library_candidates(user_id, allow_explicit)
-    for c in familiar:
-        c["kind"] = "library"
+    await grow_catalog(session, top_artists, owned, allow_explicit, vibe=spec["vibe"])
 
-    # The query vector drives ANN retrieval AND ranks the familiar half (whose
-    # taste-fit is uniformly ~1.0 and can't discriminate) — the embedded vibe text.
-    vibe_vec: list[float] | None = None
-    if spec["vibe"].strip() and embeddings.is_configured():
-        vecs = await embeddings.embed_texts([spec["vibe"]])
-        if vecs and vecs[0] is not None:
-            vibe_vec = vecs[0]
+    vibe_vec = await embeddings.embed_query(spec["vibe"])
 
-    discovery: dict[str, dict[str, Any]] = {}
+    # One search over everything. The user's own tracks and the wider catalog share a
+    # table and an embedding space, so whatever genuinely sits nearest the vibe wins;
+    # ownership only decides how a row is labelled, not whether it can be picked.
+    pool = await db.vector_search_catalog(
+        user_id, vibe_vec, CURATE_POOL, allow_explicit, exclude_owned=False
+    )
+    for c in pool:
+        c["kind"] = "familiar" if c["spotify_track_id"] in owned else "discovery"
 
-    # 2a) Catalog ANN nearest the embedded vibe.
-    if vibe_vec is not None:
-        for c in await db.vector_search_catalog(user_id, vibe_vec, CATALOG_K, allow_explicit):
-            c["kind"] = "discovery"
-            discovery[c["spotify_track_id"]] = c
-
-    # 2b) Live Spotify search of the LLM's discovery names (persist + embed).
-    live = await _live_discovery(session, spec, owned)
-    await _persist_and_embed(live)
-    for c in live:
-        c["kind"] = "discovery"
-        discovery.setdefault(c["spotify_track_id"], c)
-
-    discovery_list = [c for c in discovery.values() if c["spotify_track_id"] not in owned]
-
-    # 3) RERANK — enrich thin rows, taste-score everything, apply avoid-filter.
-    await _enrich_genres(discovery_list)
+    await _enrich_genres(pool)
     if avoid:
-        await _infer_missing_genres(discovery_list)
-    familiar = _drop_avoided(familiar, avoid)
-    discovery_list = _drop_avoided(discovery_list, avoid)
-
-    all_ids = [c["spotify_track_id"] for c in familiar + discovery_list]
-    taste = await db.knn_taste_scores(user_id, all_ids, 5)
-    for c in familiar + discovery_list:
-        c["taste"] = taste.get(c["spotify_track_id"], 0.0)
-
-    if vibe_vec is not None:
-        # Rank both halves by how well they fit the request's vibe. Familiar
-        # taste-fit is uniformly ~1.0, so vibe similarity is what makes the
-        # request actually shape the familiar half; live finds have no ANN
-        # similarity yet, so fill it in here too.
-        vibe = await db.vibe_scores(all_ids, vibe_vec)
-        for c in familiar + discovery_list:
-            c["similarity"] = vibe.get(c["spotify_track_id"], c.get("similarity", 0.0))
-        familiar.sort(key=lambda c: (c.get("similarity", 0.0), c.get("popularity") or 0), reverse=True)
-    else:
-        # No vibe (params build, no genres/description): fall back to taste-fit.
-        familiar.sort(key=lambda c: (c["taste"], c.get("popularity") or 0), reverse=True)
-    discovery_list.sort(key=_discovery_score, reverse=True)
-
-    # Build the ~40-track curate pool, proportioned by mix.
-    n_disc = round(CURATE_POOL * spec["mix"] / 100)
-    n_fam = CURATE_POOL - n_disc
-    pool = familiar[:n_fam] + discovery_list[:n_disc]
-    # Backfill the pool from whichever side has extra, so it reaches CURATE_POOL.
-    if len(pool) < CURATE_POOL:
-        extra = familiar[n_fam:] + discovery_list[n_disc:]
-        pool += extra[: CURATE_POOL - len(pool)]
+        await _infer_missing_genres(pool)
+        pool = _drop_avoided(pool, avoid)
     if not pool:
         raise HTTPException(status_code=422, detail="No candidates matched — try a broader request or sync your library.")
-    by_id = {c["spotify_track_id"]: c for c in pool}
+
+    # kNN taste-fit rides along as a column for the curator to weigh — it is not a
+    # separate ranking stage; ANN order is the ranking.
+    taste = await db.knn_taste_scores(user_id, [c["spotify_track_id"] for c in pool], 5)
     for i, c in enumerate(pool, start=1):
+        c["taste"] = taste.get(c["spotify_track_id"], 0.0)
         c["n"] = i
+    by_id = {c["spotify_track_id"]: c for c in pool}
 
-    # 4) CURATE — the RAG step (grounded, validated). Fallback = ranked order.
-    chosen_ids: list[str] | None = None
-    if llm.is_configured():
-        chosen_ids = await llm.curate(pool, spec, top_artists, length)
-    if not chosen_ids:
-        chosen_ids = [c["spotify_track_id"] for c in _mix_order(familiar, discovery_list, spec["mix"])]
+    # 3) CURATE — the RAG step. The model only ever returns numbers from the list it
+    #    was shown, and unknown numbers are dropped, so an invented track cannot survive.
+    chosen_ids = await llm.curate(pool, spec, top_artists, length)
 
-    # 5) SAFETY — validate ids, dedupe, per-artist cap, then backfill + order.
+    # 4) SAFETY — dedupe, per-artist cap, backfill to length, variety order.
     chosen = _safety_pass([by_id[i] for i in chosen_ids if i in by_id], pool, length)
     return _finalize(chosen, spec)
-
-
-def _mix_order(
-    familiar: list[dict[str, Any]], discovery: list[dict[str, Any]], mix: int
-) -> list[dict[str, Any]]:
-    """Deterministic fallback order: interleave the two ranked pools by mix."""
-    fam, disc = list(familiar), list(discovery)
-    out: list[dict[str, Any]] = []
-    take_disc = mix / 100.0
-    acc = 0.0
-    while fam or disc:
-        acc += take_disc
-        if disc and (acc >= 1.0 or not fam):
-            out.append(disc.pop(0))
-            acc -= 1.0
-        elif fam:
-            out.append(fam.pop(0))
-        elif disc:
-            out.append(disc.pop(0))
-    return out
 
 
 def _safety_pass(
@@ -458,10 +364,11 @@ def _safety_pass(
 
 
 async def _infer_missing_genres(cands: list[dict[str, Any]]) -> None:
-    """For candidates still lacking genres (fresh finds Spotify never tagged), ask
-    Gemini for tags so the avoid-genre filter can catch them. Best-effort."""
-    if not llm.is_configured():
-        return
+    """Tag candidates that still have no genres so the avoid-genre filter can catch
+    them. This is the app's only genre source — Spotify exposes no ``genres`` field to
+    dev-mode apps, so without this "no rap" would match nothing and filter nothing.
+    Best-effort by design: a tagging failure costs precision on one request, and is
+    not worth failing the whole build over."""
     names: set[str] = set()
     for c in cands:
         if not c.get("genres"):
@@ -601,11 +508,10 @@ def _library_clusters(lib: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 async def recommend(session: dict[str, Any], force: bool = False) -> dict[str, Any]:
-    """The For You feed: one curated playlist per k-means taste mode, plus Fresh Finds.
-    A shared discovery pool (grounded LLM ideas → live Spotify search → embed) feeds
-    everything; each playlist is an ANN slice around its cluster centroid. Cached per
-    user for FEED_TTL; ``force=True`` (the Refresh button) rebuilds. Degrades
-    gracefully."""
+    """The For You feed: one saveable playlist per k-means taste mode, plus Fresh Finds.
+    No LLM curation here — with no request to reason about, retrieval IS the answer:
+    each shelf is an ANN slice around one cluster centroid. Cached per user for
+    FEED_TTL; ``force=True`` (the Refresh button) rebuilds."""
     user_id = session["user_id"]
     if not force:
         cached = _feed_cache.get(user_id)
@@ -615,20 +521,11 @@ async def recommend(session: dict[str, Any], force: bool = False) -> dict[str, A
 
     owned = await db.get_library_track_ids(user_id)
     artist_rows = await db.get_artist_weights(user_id)
-    genre_rows = await db.get_genre_weights(user_id)
     top_artists = [r["name"] for r in artist_rows[:15]]
-    top_genres = [r["genre"] for r in genre_rows[:12]]
 
-    # 1) DISCOVERY POOL — new songs from the user's taste (LLM ideas → live Spotify
-    #    search → persist + embed, so the finds also land in the catalog/flywheel).
-    ideas = await llm.discovery_ideas(top_genres, top_artists) if llm.is_configured() else None
-    disc_spec = {
-        "discovery_artists": (ideas["artists"][:10] if ideas else top_artists[:8]),
-        "discovery_tracks": (ideas["tracks"][:10] if ideas else []),
-        "allow_explicit": allow_explicit,
-    }
-    pool = await _live_discovery(session, disc_spec, owned)
-    await _persist_and_embed(pool)
+    # 1) Grow the catalog from this user's taste, so the ANN slices below have new
+    #    music to find. Same single path the playlist builder uses, minus a vibe.
+    pool = await grow_catalog(session, top_artists, owned, allow_explicit)
     await _enrich_genres(pool)
     for c in pool:
         c["kind"] = "discovery"

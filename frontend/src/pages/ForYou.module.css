@@ -1,0 +1,308 @@
+.page-header {
+	display: flex;
+	align-items: end;
+	justify-content: space-between;
+	gap: 16px;
+	margin-bottom: 20px;
+}
+
+.refresh {
+	display: inline-flex;
+	align-items: center;
+	gap: 8px;
+	min-height: 38px;
+	padding: 0 16px;
+	border: 1px solid var(--color-border);
+	border-radius: 999px;
+	background: transparent;
+	color: var(--color-soft);
+	font-weight: 700;
+	font-size: 0.86rem;
+	cursor: pointer;
+	flex: 0 0 auto;
+	transition:
+		background 160ms ease,
+		color 160ms ease;
+}
+
+.refresh:hover:not(:disabled) {
+	background: #1f1f1f;
+	color: #fff;
+}
+
+.refresh:disabled {
+	opacity: 0.55;
+	cursor: progress;
+}
+
+/* describe bar */
+.describe {
+	margin-bottom: 34px;
+}
+
+.describe-field {
+	display: flex;
+	align-items: center;
+	gap: 10px;
+	padding: 8px 8px 8px 16px;
+	border: 1px solid var(--color-border);
+	border-radius: 999px;
+	background: var(--color-surface-elevated);
+	transition: border-color 160ms ease;
+}
+
+.describe-field:focus-within {
+	border-color: var(--color-accent);
+}
+
+.describe-field .describe-icon {
+	color: var(--color-accent);
+	flex: 0 0 auto;
+}
+
+.describe-field input {
+	flex: 1 1 auto;
+	min-width: 0;
+	border: 0;
+	background: transparent;
+	color: #fff;
+	font: inherit;
+	font-size: 1rem;
+	padding: 8px 0;
+}
+
+.describe-field input:focus {
+	outline: none;
+}
+
+.length {
+	flex: 0 0 auto;
+	border: 1px solid var(--color-border);
+	border-radius: 999px;
+	background: #121212;
+	color: var(--color-soft);
+	font: inherit;
+	font-size: 0.82rem;
+	padding: 8px 10px;
+	cursor: pointer;
+}
+
+.go {
+	flex: 0 0 auto;
+	min-height: 42px;
+	padding: 0 22px;
+	border: 0;
+	border-radius: 999px;
+	background: var(--color-accent);
+	color: #061109;
+	font-weight: 800;
+	cursor: pointer;
+	transition: transform 160ms ease;
+}
+
+.go:hover:not(:disabled) {
+	transform: translateY(-1px);
+}
+
+.go:disabled {
+	opacity: 0.5;
+	cursor: not-allowed;
+}
+
+.error {
+	margin: 12px 4px 0;
+	color: #ffd2d2;
+	font-size: 0.85rem;
+}
+
+/* feed */
+.feed {
+	display: grid;
+	gap: 34px;
+}
+
+/* Grid items default to min-width:auto, so a shelf would stretch to the rail's
+   min-content width (every card laid end to end) and scroll the whole page
+   sideways instead of the rail. */
+.shelf {
+	min-width: 0;
+}
+
+.shelf-head {
+	display: flex;
+	align-items: end;
+	justify-content: space-between;
+	gap: 16px;
+	margin: 0 0 14px;
+}
+
+.shelf h2 {
+	margin: 0;
+	font-size: 1.3rem;
+}
+
+.shelf-title small {
+	display: block;
+	margin-top: 4px;
+	color: #a7a7a7;
+	font-size: 0.82rem;
+}
+
+.save {
+	display: inline-flex;
+	align-items: center;
+	gap: 7px;
+	flex: none;
+	padding: 8px 16px;
+	border: 1px solid var(--color-border);
+	border-radius: 999px;
+	background: transparent;
+	color: #fff;
+	font-size: 0.85rem;
+	font-weight: 600;
+	cursor: pointer;
+	transition:
+		background 160ms ease,
+		border-color 160ms ease,
+		color 160ms ease;
+}
+
+.save:hover:not(:disabled) {
+	border-color: #1ed760;
+	background: #1ed760;
+	color: #071108;
+}
+
+.save:disabled {
+	opacity: 0.6;
+	cursor: default;
+}
+
+.rail {
+	display: flex;
+	gap: 16px;
+	overflow-x: auto;
+	padding-bottom: 10px;
+	scrollbar-width: thin;
+}
+
+.song {
+	position: relative;
+	display: grid;
+	align-content: start;
+	gap: 4px;
+	flex: 0 0 168px;
+	width: 168px;
+	padding: 12px;
+	border-radius: 10px;
+	background: #181818;
+	transition: background 160ms ease;
+}
+
+.song:hover {
+	background: #242424;
+}
+
+.song strong,
+.song small {
+	min-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.song strong {
+	margin-top: 8px;
+	font-size: 0.92rem;
+}
+
+.song small {
+	color: #a7a7a7;
+	font-size: 0.82rem;
+}
+
+.open {
+	position: absolute;
+	right: 18px;
+	top: 18px;
+	display: grid;
+	width: 32px;
+	height: 32px;
+	place-items: center;
+	border-radius: 999px;
+	background: rgba(0, 0, 0, 0.5);
+	color: #fff;
+	opacity: 0;
+	transition: opacity 160ms ease;
+}
+
+.song:hover .open {
+	opacity: 1;
+}
+
+.open:hover {
+	background: #1ed760;
+	color: #071108;
+}
+
+/* states */
+.notice {
+	display: grid;
+	place-items: center;
+	gap: 14px;
+	padding: 56px 24px;
+	border: 1px dashed var(--color-border);
+	border-radius: 12px;
+	color: var(--color-muted);
+	text-align: center;
+}
+
+.ghost {
+	display: inline-flex;
+	align-items: center;
+	gap: 8px;
+	min-height: 40px;
+	padding: 0 18px;
+	border: 0;
+	border-radius: 999px;
+	background: #2a2a2a;
+	color: #fff;
+	font-weight: 800;
+	cursor: pointer;
+}
+
+.skel-heading {
+	display: block;
+	width: 180px;
+	height: 20px;
+	margin-bottom: 14px;
+	border-radius: 6px;
+}
+
+.skeleton-card {
+	pointer-events: none;
+}
+
+.skel-art {
+	width: 100%;
+	aspect-ratio: 1;
+	border-radius: 8px;
+	margin-bottom: 8px;
+}
+
+.skel-line {
+	height: 11px;
+	border-radius: 4px;
+}
+
+@media (max-width: 640px) {
+	.describe-field {
+		flex-wrap: wrap;
+		border-radius: 16px;
+	}
+
+	.describe-field input {
+		flex-basis: 100%;
+		order: -1;
+	}
+}

@@ -61,7 +61,7 @@ straight back to Spotify as a playlist.
 
 ## Technologies Used
 
-- **Frontend:** Svelte, Vite, TypeScript
+- **Frontend:** React, Vite, TypeScript
 - **Backend:** FastAPI (Python)
 - **Database:** Supabase Postgres with `pgvector` (HNSW index)
 - **Embeddings:** Google Gemini `gemini-embedding-001`
