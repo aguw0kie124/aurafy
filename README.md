@@ -1,18 +1,17 @@
 # Aurafy
 
 A "For You" feed and playlist curator for Spotify. Aurafy learns your taste, finds distinct
-listening modes in your library, and surfaces new songs matching each one —
-plus a Recap of what you've been playing. Anything it finds can be saved
-straight back to Spotify as a playlist.
+listening modes in your library, and surfaces new songs matching each one. Anything it finds can be saved
+back to Spotify as a playlist. 
 
 ## Features
 
 - **For You feed** — one row per distinct taste mode in your library, filled
   with new tracks that match it
 - **Recap** — a look back at your recent listening
-- **Playlist builder** — describe what you want in plain English, get a
+- **Playlist builder** — describe what you want, get a
   playlist back
-- **One-click save** — turn any row or generated playlist into a real
+- **One-click save** — turn any row or generated playlist into a saved
   Spotify playlist
 
 ## Setup
